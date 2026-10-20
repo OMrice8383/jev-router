@@ -155,6 +155,34 @@ describe("pi adapter regressions", () => {
     expect((calls.log[0]!.decision as { effort?: string }).effort).toBeUndefined();
   });
 
+  for (const level of ["off", "xhigh"] as const) {
+    test(`judge fallback preserves actual ${level} thinking across healthy tool continuations`, async () => {
+      const p = minimalPolicy();
+      p.candidates.frontier.effort = ["medium", "high"];
+      p.candidates.frontier.default_effort = "medium";
+      let actual: Effort | "off" = level;
+      const { router, calls } = harness(failedJudge, {
+        policy: loadPolicy(p),
+        currentModel: () => frontier,
+        currentThinkingLevel: () => actual,
+        setThinkingLevel: (next) => {
+          actual = next;
+        },
+      });
+      await router.onBeforeAgentStart({ prompt: "continue existing work" });
+      for (let i = 0; i < 3; i++) {
+        await router.onTurnEnd({ model: frontier, usage, toolResults: [{ toolName: "read", isError: false }] });
+        expect(actual).toBe(level);
+      }
+      await router.onTurnEnd({ model: frontier, usage, toolResults: [] });
+      expect(calls.setModel).toEqual([]);
+      expect(calls.log.slice(1).every((record) => (record.decision as { source: string }).source === "lease")).toBe(true);
+      for (const record of calls.log) {
+        expect((record.decision as { effort?: string }).effort).toBe(level === "off" ? undefined : level);
+      }
+    });
+  }
+
   test("usage belongs to the completed decision, including the final no-tools turn", async () => {
     const { router, calls } = harness(new MockJudge(midAnswers));
     await router.onBeforeAgentStart({ prompt: "refactor" });

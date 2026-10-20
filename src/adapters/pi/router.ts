@@ -245,8 +245,8 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
       }
     }
     const current = this.session.current;
-    if (concluded.decision.source === "fallback" && current?.candidate === concluded.decision.candidate) {
-      // Failure must preserve Pi's actual effort, including off or a level the policy would otherwise clamp.
+    if (["fallback", "lease", "hold"].includes(concluded.decision.source) && current?.candidate === concluded.decision.candidate) {
+      // A fallback and its healthy continuation preserve actual effort, including off and levels outside this policy.
       const { effort: _proposed, ...decision } = concluded.decision;
       concluded = {
         decision: {
@@ -308,7 +308,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
           this.ownSwitch = false;
         }
       }
-      if (decision.effort) this.deps.setThinkingLevel(decision.effort);
+      if (decision.effort && decision.effort !== this.deps.currentThinkingLevel?.()) this.deps.setThinkingLevel(decision.effort);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
