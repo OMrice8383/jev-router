@@ -1,7 +1,7 @@
 {
   "name": "@french-castle/jev-router",
-  "version": "0.3.0-nagakura.1",
-  "description": "Route each coding-agent turn to the cheapest model that can finish it. Switchyard-style execution signals, TypeSafe's jev as the judge, and honest cost accounting. Works with Claude Code, Codex, OpenCode, and Pi.",
+  "version": "0.3.0-nagakura.2",
+  "description": "Route each coding-agent turn to the cheapest model that can finish it. Switchyard-style execution signals, TypeSafe\u0027s jev as the judge, and honest cost accounting. Works with Claude Code, Codex, OpenCode, and Pi.",
   "keywords": [
     "llm",
     "router",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": "\u003e=22"
   },
   "bin": {
     "jev-router": "dist/cli/index.js"
@@ -42,7 +42,8 @@
     "README.md",
     "LICENSE",
     "docs/DOWNSTREAM_SETUP.md",
-    "docs/VERIFICATION_2026-10-21.md"
+    "docs/VERIFICATION_2026-10-21.md",
+    "docs/LIVE_VERIFICATION_2026-10-21.md"
   ],
   "exports": {
     "./core": {
@@ -78,12 +79,12 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist && bun build src/core/index.ts src/judge/index.ts src/runtime/index.ts src/daemon/index.ts src/measure/index.ts src/adapters/pi/index.ts src/adapters/opencode/index.ts src/cli/index.ts --outdir dist --target node --splitting --external '@earendil-works/*' --external '@opencode-ai/*' && bun build src/adapters/opencode/index.ts --outfile dist/adapters/opencode/plugin.js --target node --external '@opencode-ai/*' && tsc -p tsconfig.build.json --emitDeclarationOnly --declaration --outDir dist",
+    "build": "rm -rf dist \u0026\u0026 bun build src/core/index.ts src/judge/index.ts src/runtime/index.ts src/daemon/index.ts src/measure/index.ts src/adapters/pi/index.ts src/adapters/opencode/index.ts src/cli/index.ts --outdir dist --target node --splitting --external \u0027@earendil-works/*\u0027 --external \u0027@opencode-ai/*\u0027 \u0026\u0026 bun build src/adapters/opencode/index.ts --outfile dist/adapters/opencode/plugin.js --target node --external \u0027@opencode-ai/*\u0027 \u0026\u0026 tsc -p tsconfig.build.json --emitDeclarationOnly --declaration --outDir dist",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",
-    "check": "bun run typecheck && bun run lint && bun test && bun run build && node scripts/cancel-smoke.mjs",
-    "prepublishOnly": "bun run check && bun run build"
+    "check": "bun run typecheck \u0026\u0026 bun run lint \u0026\u0026 bun test \u0026\u0026 bun run build \u0026\u0026 node scripts/cancel-smoke.mjs",
+    "prepublishOnly": "bun run check \u0026\u0026 bun run build"
   },
   "pi": {
     "extensions": [
@@ -91,8 +92,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.87.0",
-    "@opencode-ai/plugin": ">=1.0.0"
+    "@earendil-works/pi-coding-agent": "\u003e=0.87.0",
+    "@opencode-ai/plugin": "\u003e=1.0.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
