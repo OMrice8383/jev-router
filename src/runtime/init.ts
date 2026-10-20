@@ -68,7 +68,7 @@ export async function initPolicy(opts: InitOptions): Promise<InitResult> {
     opts.subscriptions === false
       ? undefined
       : (opts.subscriptions ??
-        (await detectSubscriptions({ home: opts.home ?? homedir(), ...(opts.readFile ? { readFile: opts.readFile } : {}) })));
+        (await detectSubscriptions({ home: opts.home ?? homedir(), env, ...(opts.readFile ? { readFile: opts.readFile } : {}) })));
 
   let catalog: ReturnType<typeof parseOpenRouterCatalog> | undefined;
   const fetchImpl = opts.fetch === null ? undefined : (opts.fetch ?? fetch);

@@ -1,5 +1,5 @@
 import { access, constants } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, extname, join } from "node:path";
 import type { Agent } from "./setup";
 
 export interface AgentProbe {
@@ -19,12 +19,24 @@ const fsExists = async (path: string): Promise<boolean> => {
 
 /** Whether an executable of this name sits in any $PATH entry. */
 export async function executableOnPath(binary: string, pathVar = process.env.PATH ?? ""): Promise<boolean> {
+  const names =
+    process.platform === "win32" && extname(binary) === ""
+      ? [
+          binary,
+          ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+            .split(";")
+            .filter(Boolean)
+            .map((ext) => `${binary}${ext}`),
+        ]
+      : [binary];
   for (const dir of pathVar.split(delimiter).filter(Boolean)) {
-    try {
-      await access(join(dir, binary), constants.X_OK);
-      return true;
-    } catch {
-      /* next entry */
+    for (const name of names) {
+      try {
+        await access(join(dir, name), constants.X_OK);
+        return true;
+      } catch {
+        /* next entry */
+      }
     }
   }
   return false;

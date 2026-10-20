@@ -2,7 +2,7 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { GEMINI_ROUTE_MODEL } from "../runtime/gemini-defaults";
-import { resolvePolicyPath } from "../runtime/paths";
+import { type Env, resolvePolicyPath } from "../runtime/paths";
 import { cursorSetupSteps } from "./expose";
 import { geminiEndpoint, planGeminiEnv, planGeminiSettings } from "./gemini-plans";
 import { parseJsonc, stripJsonComments } from "./jsonc";
@@ -32,6 +32,8 @@ export interface SetupOptions {
   readonly behavesAs?: string;
   readonly dryRun: boolean;
   readonly home?: string;
+  /** Environment selecting CLAUDE_CONFIG_DIR and policy paths; injectable for disposable-home tests. */
+  readonly env?: Env;
   /** Standalone OpenCode plugin bundle to copy into OpenCode's plugin directory. */
   readonly openCodePluginPath?: string;
   readonly log: (line: string) => void;
@@ -77,6 +79,7 @@ const json = (v: JsonObject): string => `${JSON.stringify(v, null, 2)}\n`;
 
 export async function runSetup(opts: SetupOptions): Promise<void> {
   const home = opts.home ?? homedir();
+  const env = opts.env ?? process.env;
   const target: SetupTarget = {
     baseUrl: opts.baseUrl,
     hookCommand: opts.hookCommand,
@@ -85,12 +88,13 @@ export async function runSetup(opts: SetupOptions): Promise<void> {
     ...(opts.behavesAs ? { behavesAs: opts.behavesAs } : {}),
   };
 
-  opts.log(`policy: ${await resolvePolicyPath()}`);
+  opts.log(`policy: ${await resolvePolicyPath(env)}`);
 
   for (const agent of opts.agents) {
     opts.log(`${agent}:`);
     if (agent === "claude-code") {
-      const path = join(home, ".claude", "settings.json");
+      // ASVS 5.3.2: only the trusted operator environment selects the directory; the filename is fixed.
+      const path = join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
       await writeWithBackup(path, json(planClaudeCodeSettings(await readJson(path), target)), opts);
       if (opts.auth?.claudeCode === "subscription")
         opts.log("  Claude Code keeps its own login; the relay forwards it to api.anthropic.com");
@@ -119,7 +123,8 @@ export async function runSetup(opts: SetupOptions): Promise<void> {
     } else if (agent === "cursor") {
       for (const line of cursorSetupSteps(Number(new URL(opts.baseUrl).port) || DEFAULT_PORT)) opts.log(line);
     } else {
-      opts.log("  run: pi install npm:jev-router   (in-process extension; no relay needed)");
+      opts.log("  run: pi install npm:@french-castle/jev-router   (in-process extension; no relay needed)");
+      opts.log("  instructions only; Pi is not installed automatically by setup");
     }
   }
 }
