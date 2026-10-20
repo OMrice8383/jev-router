@@ -68,6 +68,23 @@ function systemText(system: unknown): string {
     : "";
 }
 
+/** Native Claude attaches effort immediately after a fresh user turn. Never rewrite an older turn's setting. */
+function currentTurnEffortMessage(messages: JsonObject[]): number {
+  let user = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m?.role === "user" && !blocks(m.content).some((b) => b.type === "tool_result")) user = i;
+  }
+  if (user < 0) return -1;
+  let found = -1;
+  for (let i = user + 1; i < messages.length; i++) {
+    const m = messages[i];
+    if (m?.role === "user" || m?.role === "assistant") break;
+    if (m?.role === "system" && isObject(m.output_config) && asEffort(m.output_config.effort)) found = i;
+  }
+  return found;
+}
+
 export const anthropicDialect: DialectAdapter = {
   dialect: "anthropic",
   path: "/v1/messages",
@@ -113,7 +130,10 @@ export const anthropicDialect: DialectAdapter = {
     });
     const isNewUserTurn = !!last && last.role === "user" && results.length === 0;
 
-    const effort = isObject(body.output_config) ? asEffort(body.output_config.effort) : undefined;
+    const turnOutput = messages[currentTurnEffortMessage(messages)]?.output_config;
+    const effort =
+      (isObject(turnOutput) ? asEffort(turnOutput.effort) : undefined) ??
+      (isObject(body.output_config) ? asEffort(body.output_config.effort) : undefined);
     const firstUser = messages.find((m) => m.role === "user");
     return {
       requestedModel: asString(body.model) ?? "",
@@ -132,6 +152,7 @@ export const anthropicDialect: DialectAdapter = {
   rewrite(body, decision: Decision): JsonObject {
     const out: JsonObject = { ...body, model: decision.model };
     const caps = outputCapabilities(decision.model);
+    let perMessageEffortChanged = false;
     const output = isObject(body.output_config) ? body.output_config : undefined;
     const effort = decision.effort ?? asEffort(output?.effort);
     if (caps && !caps.adaptive) {
@@ -142,6 +163,20 @@ export const anthropicDialect: DialectAdapter = {
       }
     } else if (decision.effort && (caps?.adaptive || (output && "effort" in output))) {
       out.output_config = { ...output, effort: ANTHROPIC_EFFORT[decision.effort] };
+    }
+    if (caps?.adaptive && decision.effort && Array.isArray(body.messages)) {
+      const messages = body.messages.filter(isObject);
+      const index = currentTurnEffortMessage(messages);
+      const current = messages[index];
+      if (current && isObject(current.output_config)) {
+        // The native per-message setting takes precedence. Reuse its existing protocol/header;
+        // preserve historical settings and the top-level value so healthy continuations keep their prefix.
+        perMessageEffortChanged = asEffort(current.output_config.effort) !== decision.effort;
+        const turnOutput = { ...current.output_config, effort: ANTHROPIC_EFFORT[decision.effort] };
+        out.messages = body.messages.map((message) => (message === current ? { ...current, output_config: turnOutput } : message));
+        if (body.output_config !== undefined) out.output_config = body.output_config;
+        else delete out.output_config;
+      }
     }
     if (!caps) return out;
     if (typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens)) {
@@ -156,7 +191,7 @@ export const anthropicDialect: DialectAdapter = {
         caps.adaptive &&
         (thinking.type === "enabled" ||
           thinking.type === "adaptive" ||
-          (thinking.type === "disabled" && (caps.alwaysThinking || effort === "xhigh" || effort === "max")))
+          (thinking.type === "disabled" && (caps.alwaysThinking || perMessageEffortChanged || effort === "xhigh" || effort === "max")))
       ) {
         const { budget_tokens: _budget, ...rest } = thinking;
         out.thinking = { ...rest, type: "adaptive" };
