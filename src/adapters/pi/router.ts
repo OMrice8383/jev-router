@@ -1,9 +1,17 @@
 import { type Concluded, plan } from "../../core/decide";
 import type { Policy } from "../../core/policy/types";
 import { type ApplyOutcome, buildDecisionRecord, type DecisionRecord, type JudgeTrace } from "../../core/record";
-import { emptySession } from "../../core/session";
+import { emptySession, withUsage } from "../../core/session";
 import { scoreStage } from "../../core/signals/stage";
-import type { Decision, Effort, NormalizedRequest, SessionState, ToolOutcome } from "../../core/types";
+import {
+  type Decision,
+  EFFORT_ORDER,
+  type Effort,
+  type LastUsage,
+  type NormalizedRequest,
+  type SessionState,
+  type ToolOutcome,
+} from "../../core/types";
 import type { Judge } from "../../judge/types";
 
 export interface PiModelRef {
@@ -26,6 +34,7 @@ export interface PiRouterDeps<TModel extends PiModelRef = PiModelRef> {
   setModel(model: TModel): Promise<boolean>;
   setThinkingLevel(level: Effort): void;
   currentModel(): TModel | undefined;
+  currentThinkingLevel?(): Effort | "off" | undefined;
   getActiveTools(): readonly string[];
   getContextTokens(): number | null;
   notify(message: string, level: "info" | "warning" | "error"): void;
@@ -41,6 +50,8 @@ const INTENT_TAIL = 400;
 const CHARS_PER_TOKEN = 4;
 
 const tail = (s: string, n: number): string => (s.length > n ? s.slice(-n) : s);
+const sameModel = (a: PiModelRef | undefined, b: PiModelRef | undefined): boolean =>
+  a !== undefined && b !== undefined && a.provider === b.provider && a.id === b.id;
 
 /**
  * In-process routing loop for Pi. Holds the per-session state that the pure core cannot,
@@ -57,6 +68,9 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
   private lastTokens: number | undefined;
   private lastDecision: Decision | undefined;
   private lastApplyError: string | undefined;
+  private hasImages = false;
+  // Log once on completion; a new request or shutdown flushes an uncompleted decision without invented usage.
+  private pendingRecord: { readonly record: DecisionRecord; readonly model: PiModelRef | undefined } | undefined;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: PiRouterDeps<TModel>) {}
@@ -66,40 +80,75 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
   }
 
   onSessionStart(_reason: string): void {
+    this.flushRecord();
     this.session = emptySession();
+    this.syncCurrent();
     this.sessionKey = this.deps.randomId();
     this.paused = false;
     this.pendingCompaction = false;
     this.intentTail = undefined;
     this.lastTokens = undefined;
     this.lastDecision = undefined;
+    this.lastApplyError = undefined;
+    this.hasImages = false;
     this.deps.status(this.statusText());
   }
 
   onBeforeAgentStart(event: { readonly prompt: string; readonly images?: readonly unknown[] }): Promise<void> {
+    this.hasImages ||= (event.images?.length ?? 0) > 0;
     if (!this.isActive) return Promise.resolve();
     const request = this.request({
       isNewUserTurn: true,
       lastUserText: event.prompt,
-      hasImages: (event.images?.length ?? 0) > 0,
+      hasImages: this.hasImages,
       toolOutcomes: [],
     });
-    return this.enqueue(request);
+    return this.enqueue(() => this.route(request));
   }
 
-  onTurnEnd(event: { readonly assistantText?: string; readonly toolResults: readonly PiToolResult[] }): Promise<void> {
+  onTurnEnd(event: {
+    readonly assistantText?: string;
+    readonly toolResults: readonly PiToolResult[];
+    readonly model?: PiModelRef;
+    readonly usage?: LastUsage;
+    readonly hasImages?: boolean;
+  }): Promise<void> {
     if (event.assistantText) this.intentTail = tail(event.assistantText, INTENT_TAIL);
-    if (!this.isActive || event.toolResults.length === 0) return Promise.resolve();
-    const toolOutcomes: ToolOutcome[] = event.toolResults.map((r) => ({
-      name: r.toolName,
-      isError: r.isError,
-      ...(r.text ? (r.isError ? { errorText: tail(r.text, EXCERPT_TAIL) } : { excerpt: tail(r.text, EXCERPT_TAIL) }) : {}),
-    }));
-    return this.enqueue(this.request({ isNewUserTurn: false, hasImages: false, toolOutcomes }));
+    this.hasImages ||= event.hasImages === true;
+    return this.enqueue(async () => {
+      const served = event.model ?? this.deps.currentModel();
+      // ASVS 2.2.1: malformed external usage must not influence cache decisions or cost records.
+      const usage =
+        event.usage &&
+        Number.isFinite(event.usage.inputTokens) &&
+        Number.isFinite(event.usage.outputTokens) &&
+        Object.values(event.usage).every((n) => Number.isFinite(n) && n >= 0)
+          ? event.usage
+          : undefined;
+      const current = this.session.current;
+      this.session = withUsage(
+        this.session,
+        current && sameModel(served, this.resolve(current.candidate)) && sameModel(served, this.deps.currentModel()) ? usage : undefined,
+      );
+      const pending = this.pendingRecord;
+      this.flushRecord(pending?.record.apply?.ok && sameModel(served, pending.model) ? usage : undefined);
+      if (!this.isActive || event.toolResults.length === 0) return;
+      const toolOutcomes: ToolOutcome[] = event.toolResults.map((r) => ({
+        name: r.toolName,
+        isError: r.isError,
+        ...(r.text ? (r.isError ? { errorText: tail(r.text, EXCERPT_TAIL) } : { excerpt: tail(r.text, EXCERPT_TAIL) }) : {}),
+      }));
+      await this.route(this.request({ isNewUserTurn: false, hasImages: this.hasImages, toolOutcomes }));
+    });
+  }
+
+  onSessionShutdown(): Promise<void> {
+    return this.enqueue(() => this.flushRecord());
   }
 
   onSessionCompact(): void {
     this.pendingCompaction = true;
+    // Compaction may retain images, so only a session reset can safely clear the sticky capability requirement.
   }
 
   /** A model change we did not cause is a manual override: pause until the user resumes. */
@@ -133,6 +182,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     part: Pick<NormalizedRequest, "isNewUserTurn" | "hasImages" | "toolOutcomes"> & { readonly lastUserText?: string },
   ): NormalizedRequest {
     const current = this.deps.currentModel();
+    const effort = this.currentEffort();
     const reported = this.deps.getContextTokens();
     if (reported !== null && reported > 0) this.lastTokens = reported;
     const estimated = this.lastTokens ?? Math.ceil((part.lastUserText?.length ?? 0) / CHARS_PER_TOKEN);
@@ -143,6 +193,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
       harness: "pi",
       sessionKey: this.sessionKey,
       requestedModel: current?.id ?? "auto",
+      ...(effort ? { requestedEffort: effort } : {}),
       isNewUserTurn: part.isNewUserTurn,
       ...(part.lastUserText !== undefined ? { lastUserText: part.lastUserText } : {}),
       ...(this.intentTail ? { assistantIntentTail: this.intentTail } : {}),
@@ -154,16 +205,17 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     };
   }
 
-  private enqueue(request: NormalizedRequest): Promise<void> {
-    this.queue = this.queue
-      .then(() => this.route(request))
-      .catch((e: unknown) => {
-        this.deps.notify(`jev-router: routing error, request left unchanged (${e instanceof Error ? e.message : String(e)})`, "warning");
-      });
+  private enqueue(work: () => void | Promise<void>): Promise<void> {
+    this.queue = this.queue.then(work).catch((e: unknown) => {
+      this.deps.notify(`jev-router: routing error, request left unchanged (${e instanceof Error ? e.message : String(e)})`, "warning");
+    });
     return this.queue;
   }
 
   private async route(request: NormalizedRequest): Promise<void> {
+    this.flushRecord();
+    if (!this.isActive) return;
+    this.syncCurrent();
     const { policy, policyId, judge } = this.deps;
     const outcome = plan({ request, session: this.session, policy, policyId });
     let concluded: Concluded;
@@ -192,8 +244,23 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
         }
       }
     }
+    const current = this.session.current;
+    if (concluded.decision.source === "fallback" && current?.candidate === concluded.decision.candidate) {
+      // Failure must preserve Pi's actual effort, including off or a level the policy would otherwise clamp.
+      const { effort: _proposed, ...decision } = concluded.decision;
+      concluded = {
+        decision: {
+          ...decision,
+          reasons: decision.reasons.filter((reason) => reason !== "effort_clamped"),
+          ...(current.effort ? { effort: current.effort } : {}),
+        },
+        session: { ...concluded.session, current: { ...current, lease: decision.lease } },
+      };
+    }
     // Apply first; only a decision that took effect advances the session.
-    const apply = await this.apply(concluded.decision);
+    const apply = this.isActive
+      ? await this.apply(concluded.decision)
+      : { ok: false, error: "routing paused; current selection unchanged" };
     if (apply.ok) {
       this.session = concluded.session;
       this.lastDecision = concluded.decision;
@@ -206,8 +273,9 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     const stage = scoreStage([...concluded.session.ledger], request.harness, {
       recentTurnWindow: policy.policies[policyId]?.recent_turn_window ?? 3,
     });
-    this.deps.log(
-      buildDecisionRecord({
+    this.pendingRecord = {
+      model: apply.ok ? this.resolve(concluded.decision.candidate) : undefined,
+      record: buildDecisionRecord({
         id: this.deps.randomId(),
         ts: this.deps.now(),
         request,
@@ -217,12 +285,17 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
         apply,
         ...(judgeTrace ? { judge: judgeTrace } : {}),
       }),
-    );
+    };
     this.deps.status(this.statusText());
   }
 
   private async apply(decision: Decision): Promise<ApplyOutcome> {
     const ref = this.resolve(decision.candidate);
+    if (decision.source === "fallback") {
+      return this.session.current?.candidate === decision.candidate && sameModel(this.deps.currentModel(), ref)
+        ? { ok: true }
+        : { ok: false, error: "judge fallback not applied; current model and thinking unchanged" };
+    }
     if (!ref) return { ok: false, error: `model for candidate '${decision.candidate}' not found in Pi's registry` };
     try {
       const current = this.deps.currentModel();
@@ -240,6 +313,41 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  private flushRecord(usage?: LastUsage): void {
+    if (!this.pendingRecord) return;
+    const { record } = this.pendingRecord;
+    this.pendingRecord = undefined;
+    this.deps.log(usage ? { ...record, usage } : record);
+  }
+
+  private currentEffort(): Effort | undefined {
+    const level = this.deps.currentThinkingLevel?.();
+    return level && (EFFORT_ORDER as readonly string[]).includes(level) ? (level as Effort) : undefined;
+  }
+
+  /** Reconcile startup, restore, manual resume and thinking changes with the selection Pi actually holds. */
+  private syncCurrent(): void {
+    const selected = this.deps.currentModel();
+    const candidate = this.deps.policy.policies[this.deps.policyId]?.order.find((id) => sameModel(selected, this.resolve(id)));
+    const previous = this.session.current;
+    const { current: _current, lastUsage, ...rest } = this.session;
+    const effort = this.deps.currentThinkingLevel ? this.currentEffort() : previous?.candidate === candidate ? previous?.effort : undefined;
+    this.session = {
+      ...rest,
+      ...(candidate
+        ? {
+            current: {
+              candidate,
+              ...(effort ? { effort } : {}),
+              lease: previous?.candidate === candidate ? previous.lease : "one_call",
+              sinceTurn: previous?.candidate === candidate ? previous.sinceTurn : this.session.turn,
+            },
+            ...(previous?.candidate === candidate && lastUsage ? { lastUsage } : {}),
+          }
+        : {}),
+    };
   }
 
   private resolve(candidateId: string): TModel | undefined {

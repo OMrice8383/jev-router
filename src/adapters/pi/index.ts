@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Policy } from "../../core/policy/types";
+import { applyEnv, envFilePath, loadEnvFile } from "../../runtime/envfile";
 import { createJudge } from "../../runtime/judge-factory";
 import { JsonlLogger } from "../../runtime/log";
 import { decisionsLogPath, resolvePolicyPath } from "../../runtime/paths";
@@ -32,10 +33,15 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
 
   async function boot(ctx: ExtensionContext, reason: string): Promise<void> {
     try {
-      const policyPath = await resolvePolicyPath();
+      await router?.onSessionShutdown();
+      await logger?.flush();
+      // ASVS 13.3.2: keep setup secrets local to this judge; existing process values take precedence.
+      const env = { ...process.env };
+      applyEnv(env, await loadEnvFile(envFilePath(env)));
+      const policyPath = await resolvePolicyPath(env);
       const policy = await readPolicyFile(policyPath);
-      const judge = createJudge(policy.judge);
-      logger = new JsonlLogger(decisionsLogPath());
+      const judge = createJudge(policy.judge, env);
+      logger = new JsonlLogger(decisionsLogPath(env));
       const log = logger;
       router = new PiRouter<PiModel>({
         policy,
@@ -45,6 +51,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
         setModel: (model) => pi.setModel(model),
         setThinkingLevel: (level) => pi.setThinkingLevel(level),
         currentModel: () => ctx.model,
+        currentThinkingLevel: () => pi.getThinkingLevel(),
         getActiveTools: () => pi.getActiveTools(),
         getContextTokens: () => ctx.getContextUsage()?.tokens ?? null,
         notify: (message, level) => ctx.ui.notify(message, level),
@@ -70,14 +77,28 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("turn_end", async (event) => {
-    const assistantText = event.message.role === "assistant" ? textOf(event.message.content) : undefined;
+    const message = event.message.role === "assistant" ? event.message : undefined;
+    const assistantText = message ? textOf(message.content) : undefined;
     await router?.onTurnEnd({
       ...(assistantText ? { assistantText } : {}),
+      ...(message
+        ? {
+            model: { provider: message.provider, id: message.model },
+            usage: {
+              inputTokens: message.usage.input,
+              outputTokens: message.usage.output,
+              cacheReadTokens: message.usage.cacheRead,
+              cacheWriteTokens: message.usage.cacheWrite,
+            },
+          }
+        : {}),
+      hasImages: event.toolResults.some((r) => r.content.some((c) => c.type === "image")),
       toolResults: event.toolResults.map((r) => ({ toolName: r.toolName, isError: r.isError, text: textOf(r.content) })),
     });
   });
 
   pi.on("session_shutdown", async () => {
+    await router?.onSessionShutdown();
     await logger?.flush();
   });
 
