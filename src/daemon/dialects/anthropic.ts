@@ -100,7 +100,9 @@ export const anthropicDialect: DialectAdapter = {
       }
     }
 
-    const last = messages[messages.length - 1];
+    // Native Claude may append runtime system messages after the user or tool result.
+    // They are not conversation turns; inspect the last user/assistant without changing the wire body.
+    const last = messages.filter((m) => m.role === "user" || m.role === "assistant").at(-1);
     const lastBlocks = last && last.role === "user" ? blocks(last.content) : [];
     const results = lastBlocks.filter((b) => b.type === "tool_result");
     const toolOutcomes: ToolOutcome[] = results.map((r) => {
