@@ -1,6 +1,7 @@
 import { readFile as fsReadFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Effort } from "../core/types";
+import type { Env } from "./paths";
 
 /**
  * Detect coding subscriptions from what the harnesses leave on disk, so `init` can build candidates from the models
@@ -57,7 +58,7 @@ export const CODEX_BUILT_IN_MODELS: readonly CodexModel[] = [
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Claude Code's ~/.claude.json holds an `oauthAccount` record when logged in with a claude.ai account. */
+/** Claude Code's .claude.json account metadata (in CLAUDE_CONFIG_DIR when selected, otherwise home). */
 export function parseClaudeConfig(json: unknown): AnthropicSubscription | undefined {
   if (!isRecord(json) || !isRecord(json.oauthAccount)) return undefined;
   const acct = json.oauthAccount;
@@ -128,10 +129,12 @@ export function parseGeminiSettings(text: string | undefined): GeminiSubscriptio
 
 export interface DetectSubscriptionsOptions {
   readonly home: string;
+  readonly env?: Env;
   readonly readFile?: (path: string) => Promise<string>;
 }
 
 export async function detectSubscriptions(opts: DetectSubscriptionsOptions): Promise<SubscriptionDetection> {
+  const env = opts.env ?? process.env;
   const read = opts.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
   const json = async (path: string): Promise<unknown> => {
     try {
@@ -140,7 +143,7 @@ export async function detectSubscriptions(opts: DetectSubscriptionsOptions): Pro
       return undefined;
     }
   };
-  const anthropic = parseClaudeConfig(await json(join(opts.home, ".claude.json")));
+  const anthropic = parseClaudeConfig(await json(join(env.CLAUDE_CONFIG_DIR || opts.home, ".claude.json")));
   const codexAuth = parseCodexAuth(await json(join(opts.home, ".codex", "auth.json")));
   let chatgpt: ChatGptSubscription | undefined;
   if (codexAuth) {

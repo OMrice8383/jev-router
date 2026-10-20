@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   CODEX_BUILT_IN_MODELS,
   detectSubscriptions,
@@ -65,8 +66,8 @@ describe("subscription detection", () => {
 
   test("detectSubscriptions reads only the four files and falls back to built-in Codex models", async () => {
     const files: Record<string, string> = {
-      "/h/.claude.json": JSON.stringify({ oauthAccount: { organizationType: "claude_pro" } }),
-      "/h/.codex/auth.json": JSON.stringify({
+      [join("/h", ".claude.json")]: JSON.stringify({ oauthAccount: { organizationType: "claude_pro" } }),
+      [join("/h", ".codex", "auth.json")]: JSON.stringify({
         auth_mode: "chatgpt",
         tokens: { id_token: jwt({ "https://api.openai.com/auth": { chatgpt_plan_type: "pro" } }) },
       }),
@@ -81,7 +82,12 @@ describe("subscription detection", () => {
     const d = await detectSubscriptions({ home: "/h", readFile });
     expect(d.anthropic).toEqual({ plan: "pro" });
     expect(d.chatgpt).toEqual({ plan: "pro", models: CODEX_BUILT_IN_MODELS, modelsFrom: "built-in" });
-    expect(asked).toEqual(["/h/.claude.json", "/h/.codex/auth.json", "/h/.codex/models_cache.json", "/h/.gemini/settings.json"]);
+    expect(asked).toEqual([
+      join("/h", ".claude.json"),
+      join("/h", ".codex", "auth.json"),
+      join("/h", ".codex", "models_cache.json"),
+      join("/h", ".gemini", "settings.json"),
+    ]);
     expect(d.gemini).toBeUndefined();
     expect(
       await detectSubscriptions({
@@ -104,7 +110,7 @@ describe("subscription detection", () => {
     const d = await detectSubscriptions({
       home: "/h",
       readFile: async (p) => {
-        if (p === "/h/.gemini/settings.json") return settings;
+        if (p === join("/h", ".gemini", "settings.json")) return settings;
         throw new Error("ENOENT");
       },
     });

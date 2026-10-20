@@ -153,7 +153,12 @@ describe("statusline", () => {
     const slow = (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
     const start = Date.now();
-    expect(await statusLine({ url: "http://127.0.0.1:4141", stdin: "", fetch: slow, timeoutMs: 50 })).toBe("");
-    expect(Date.now() - start).toBeLessThan(1000);
+    const keepAlive = setInterval(() => {}, 1000);
+    try {
+      expect(await statusLine({ url: "http://127.0.0.1:4141", stdin: "", fetch: slow, timeoutMs: 50 })).toBe("");
+      expect(Date.now() - start).toBeLessThan(1000);
+    } finally {
+      clearInterval(keepAlive);
+    }
   });
 });

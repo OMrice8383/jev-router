@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "judge": {
+    "transport": "typesafe",
+    "model": "jev-latest",
+    "timeout_ms": 1500,
+    "on_error": "fail_open"
+  },
+  "egress": {
+    "anthropic-subscription": {
+      "base_url": "https://api.anthropic.com",
+      "forward_auth": true,
+      "billing": "subscription",
+      "dialects": [
+        "anthropic"
+      ]
+    },
+    "chatgpt-subscription": {
+      "base_url": "https://chatgpt.com",
+      "mount": "/backend-api/codex",
+      "forward_auth": true,
+      "billing": "subscription",
+      "pi_provider": "openai-codex",
+      "dialects": [
+        "openai-responses"
+      ]
+    }
+  },
+  "candidates": {
+    "claude-haiku": {
+      "model": "claude-haiku-4-5",
+      "via": "anthropic-subscription",
+      "price": {
+        "in": 1,
+        "out": 5
+      },
+      "effort": [],
+      "capabilities": {
+        "vision": true,
+        "tools": true,
+        "context": 200000
+      }
+    },
+    "claude-sonnet": {
+      "model": "claude-sonnet-5",
+      "via": "anthropic-subscription",
+      "price": {
+        "in": 2,
+        "out": 10
+      },
+      "effort": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "capabilities": {
+        "vision": true,
+        "tools": true,
+        "context": 1000000
+      }
+    },
+    "claude-opus": {
+      "model": "claude-opus-5-5",
+      "via": "anthropic-subscription",
+      "price": {
+        "in": 4,
+        "out": 20
+      },
+      "effort": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "capabilities": {
+        "vision": true,
+        "tools": true,
+        "context": 1000000
+      }
+    },
+    "pi-luna": {
+      "model": "gpt-6-luna",
+      "via": "chatgpt-subscription",
+      "pi": {
+        "provider": "openai-codex",
+        "model": "gpt-6-luna"
+      },
+      "price": {
+        "in": 0.1,
+        "out": 0.5
+      },
+      "effort": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "context": 272000
+      }
+    },
+    "pi-sol": {
+      "model": "gpt-6.1-sol",
+      "via": "chatgpt-subscription",
+      "pi": {
+        "provider": "openai-codex",
+        "model": "gpt-6.1-sol"
+      },
+      "price": {
+        "in": 2,
+        "out": 10
+      },
+      "effort": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "context": 500000
+      }
+    }
+  },
+  "routes": [
+    {
+      "id": "claude-code/auto",
+      "harness": "claude-code",
+      "policy": "claude"
+    },
+    {
+      "id": "auto",
+      "harness": "pi",
+      "policy": "pi"
+    }
+  ],
+  "policies": {
+    "claude": {
+      "default": "claude-sonnet",
+      "order": [
+        "claude-haiku",
+        "claude-sonnet",
+        "claude-opus"
+      ],
+      "min_confidence": 0.8,
+      "rules": [
+        {
+          "when": "stakes >= 2",
+          "then": {
+            "pin": "claude-opus",
+            "effort": "high"
+          }
+        },
+        {
+          "when": "difficulty >= 3",
+          "then": {
+            "pin": "claude-opus",
+            "effort": "high"
+          }
+        },
+        {
+          "when": "difficulty < 1.5 and stakes < 1",
+          "then": {
+            "pin": "claude-haiku"
+          }
+        },
+        {
+          "when": "spinning > 0.7",
+          "then": {
+            "up": 1,
+            "effort": "high"
+          }
+        }
+      ],
+      "switch": {
+        "cache_penalty": true,
+        "prefer_effort_over_model": false
+      },
+      "cascade": {
+        "enabled": false
+      }
+    },
+    "pi": {
+      "default": "pi-sol",
+      "order": [
+        "pi-luna",
+        "pi-sol"
+      ],
+      "min_confidence": 0.8,
+      "rules": [
+        {
+          "when": "stakes >= 2 or difficulty >= 3",
+          "then": {
+            "pin": "pi-sol",
+            "effort": "high"
+          }
+        },
+        {
+          "when": "difficulty < 1.5 and stakes < 1",
+          "then": {
+            "pin": "pi-luna",
+            "effort": "medium"
+          }
+        },
+        {
+          "when": "spinning > 0.7",
+          "then": {
+            "pin": "pi-sol",
+            "effort": "high"
+          }
+        }
+      ],
+      "switch": {
+        "cache_penalty": true,
+        "prefer_effort_over_model": false
+      },
+      "cascade": {
+        "enabled": false
+      }
+    }
+  }
+}

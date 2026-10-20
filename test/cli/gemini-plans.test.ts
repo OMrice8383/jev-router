@@ -102,7 +102,9 @@ describe("settings.json with comments", () => {
 
 describe("gemini detection and setup", () => {
   test("~/.gemini or a gemini binary counts as installed", async () => {
-    expect(await detectAgents({ home: "/h", exists: async (p) => p === "/h/.gemini", onPath: async () => false })).toEqual(["gemini"]);
+    expect(await detectAgents({ home: "/h", exists: async (p) => p === join("/h", ".gemini"), onPath: async () => false })).toEqual([
+      "gemini",
+    ]);
     expect(await detectAgents({ home: "/h", exists: async () => false, onPath: async (b) => b === "gemini" })).toEqual(["gemini"]);
   });
 
@@ -122,7 +124,7 @@ describe("gemini detection and setup", () => {
       };
       await runSetup({ ...base, dryRun: true });
       await expect(stat(join(home, ".gemini", "settings.json"))).rejects.toThrow();
-      expect(lines.some((l) => l.includes("would write") && l.includes(".gemini/settings.json"))).toBe(true);
+      expect(lines.some((l) => l.includes("would write") && l.includes(join(".gemini", "settings.json")))).toBe(true);
 
       await runSetup({ ...base, dryRun: false });
       const settings = JSON.parse(await readFile(join(home, ".gemini", "settings.json"), "utf8")) as Settings;

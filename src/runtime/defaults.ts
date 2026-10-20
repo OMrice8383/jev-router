@@ -110,7 +110,7 @@ export const ANTHROPIC_SUBSCRIPTION_CANDIDATES: Readonly<
     model: "claude-haiku-4-5",
     catalog: "anthropic/claude-haiku-4.5",
     price: { in: 1, out: 5 },
-    effort: ["low", "medium", "high"],
+    effort: [],
     capabilities: { vision: true, tools: true, context: 200_000 },
   },
   "claude-sonnet": {

@@ -21,6 +21,25 @@ const ANTHROPIC_EFFORT: Readonly<Record<Effort, string>> = {
   max: "max",
 };
 
+/** Synchronous Messages limits, not the extended-output Batch API beta. Unknown IDs stay unclassified.
+ * https://platform.claude.com/docs/en/models/overview
+ * ASVS 2.2.1: match explicit model versions rather than inferring capabilities from a family name.
+ */
+function outputCapabilities(model: string) {
+  switch (model.replace(/^anthropic\//, "").replace(/\.(\d)/g, "-$1")) {
+    case "claude-haiku-4-5":
+    case "claude-haiku-4-5-20251001":
+      return { adaptive: false, maxTokens: 64_000, alwaysThinking: false };
+    case "claude-sonnet-5":
+    case "claude-haiku-5-5":
+      return { adaptive: true, maxTokens: 128_000, alwaysThinking: false };
+    case "claude-opus-5-5":
+      return { adaptive: true, maxTokens: 128_000, alwaysThinking: true };
+    default:
+      return undefined;
+  }
+}
+
 type Block = JsonObject & { type?: string };
 
 function blocks(content: unknown): Block[] {
@@ -110,8 +129,46 @@ export const anthropicDialect: DialectAdapter = {
 
   rewrite(body, decision: Decision): JsonObject {
     const out: JsonObject = { ...body, model: decision.model };
-    if (decision.effort && isObject(body.output_config) && "effort" in body.output_config) {
-      out.output_config = { ...body.output_config, effort: ANTHROPIC_EFFORT[decision.effort] };
+    const caps = outputCapabilities(decision.model);
+    const output = isObject(body.output_config) ? body.output_config : undefined;
+    const effort = decision.effort ?? asEffort(output?.effort);
+    if (caps && !caps.adaptive) {
+      if (output && "effort" in output) {
+        const { effort: _effort, ...rest } = output;
+        if (Object.keys(rest).length > 0) out.output_config = rest;
+        else delete out.output_config;
+      }
+    } else if (decision.effort && (caps?.adaptive || (output && "effort" in output))) {
+      out.output_config = { ...output, effort: ANTHROPIC_EFFORT[decision.effort] };
+    }
+    if (!caps) return out;
+    if (typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens)) {
+      out.max_tokens = Math.min(body.max_tokens, caps.maxTokens);
+    }
+    if (isObject(body.thinking)) {
+      const thinking = body.thinking;
+      if (!caps.adaptive && thinking.type === "adaptive") {
+        // Haiku 4.5: remove adaptive thinking; never invent a manual budget or increase max_tokens.
+        delete out.thinking;
+      } else if (
+        caps.adaptive &&
+        (thinking.type === "enabled" ||
+          thinking.type === "adaptive" ||
+          (thinking.type === "disabled" && (caps.alwaysThinking || effort === "xhigh" || effort === "max")))
+      ) {
+        const { budget_tokens: _budget, ...rest } = thinking;
+        out.thinking = { ...rest, type: "adaptive" };
+      } else if (
+        !caps.adaptive &&
+        thinking.type === "enabled" &&
+        typeof thinking.budget_tokens === "number" &&
+        typeof out.max_tokens === "number" &&
+        thinking.budget_tokens >= out.max_tokens
+      ) {
+        // ASVS 2.2.3: a manual thinking budget must fit below the (possibly capped) total output budget.
+        if (out.max_tokens > 1024) out.thinking = { ...thinking, budget_tokens: out.max_tokens - 1 };
+        else delete out.thinking;
+      }
     }
     return out;
   },

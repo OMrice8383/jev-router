@@ -128,6 +128,7 @@ describe("subscription-backed policies", () => {
     expect(p.policies["claude-code"]?.default).toBe("claude-sonnet");
     expect(p.candidates["claude-opus"]?.model).toBe("claude-opus-5-5");
     expect(p.candidates["claude-opus"]?.via).toBe("anthropic-subscription");
+    expect(p.candidates["claude-haiku"]?.effort).toEqual([]);
     expect(tierOrder(p, "default")).toEqual(["fast", "mid", "frontier"]);
     expect(p.policies["claude-code"]?.rules.map((r) => r.then)).toContainEqual({ pin: "claude-haiku" });
   });

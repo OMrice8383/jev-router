@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { applyEnv, envFilePath, formatEnvFile, parseEnvFile } from "../../src/runtime/envfile";
 
 describe("env file", () => {
@@ -21,6 +22,6 @@ describe("env file", () => {
     expect(env).toEqual({ A: "already", B: "2", C: "3" });
   });
   test("lives under the config dir", () => {
-    expect(envFilePath({ JEV_ROUTER_HOME: "/x" })).toBe("/x/env");
+    expect(envFilePath({ JEV_ROUTER_HOME: "/x" })).toBe(join("/x", "env"));
   });
 });

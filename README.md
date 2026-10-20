@@ -1,3 +1,5 @@
+> **Downstream fork (not the upstream npm release).** Compatibility repairs and verification limits: [DOWNSTREAM_SETUP](docs/DOWNSTREAM_SETUP.md). No existing agent settings are changed by cloning or building.
+
 # jev-router
 
 [![CI](https://github.com/FrancoisChastel/jev-router/actions/workflows/ci.yml/badge.svg)](https://github.com/FrancoisChastel/jev-router/actions/workflows/ci.yml)

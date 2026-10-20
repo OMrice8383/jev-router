@@ -21,8 +21,6 @@ import type {
   WireDialect,
 } from "./types";
 
-/** A lease never outlives this many turns even without an error or a new user turn. */
-const LEASE_MAX_TURNS = 6;
 /** Consecutive all-failure tool batches that force an escalation. */
 const FAILURE_OVERRIDE_THRESHOLD = 3;
 
@@ -315,13 +313,7 @@ export function plan(input: PlanInput): PlanOutcome {
 
   // 3. A clean tool continuation inside a lease reuses the decision.
   const batchHasError = batch.some((o) => o.isError);
-  if (
-    !request.isNewUserTurn &&
-    current &&
-    current.lease !== "one_call" &&
-    !batchHasError &&
-    session.turn - current.sinceTurn < LEASE_MAX_TURNS
-  ) {
+  if (!request.isNewUserTurn && current && current.lease !== "one_call" && !batchHasError) {
     return decide(current.candidate, "lease", {
       reasons: ["lease_active"],
       lease: current.lease,
@@ -355,7 +347,19 @@ export function plan(input: PlanInput): PlanOutcome {
         return decide(baseline, "signals", { reasons: ["signals_capable", "effort_first"], lease: "one_call", effortWanted: stepped });
       return decide(up, "signals", { reasons: ["signals_capable"], lease: "one_call", ...effortOpt });
     }
-    if (!holdActive) return decide(tiers.down(baseline), "signals", { reasons: ["signals_efficient"], lease: "tool_chain", ...effortOpt });
+    if (!holdActive) {
+      const down = tiers.down(baseline);
+      const blocked = cacheBlock(down);
+      if (blocked && current)
+        return decide(current.candidate, "signals", {
+          reasons: ["signals_efficient", "cache_penalty_blocked"],
+          lease: "tool_chain",
+          keepCurrent: true,
+          cache: blocked,
+          ...effortOpt,
+        });
+      return decide(down, "signals", { reasons: ["signals_efficient"], lease: "tool_chain", ...effortOpt });
+    }
   }
 
   // 6. Ask the judge: task questions on a user turn, execution questions on an ambiguous continuation.
