@@ -40,7 +40,9 @@
     "plugins",
     "examples",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/DOWNSTREAM_SETUP.md",
+    "docs/VERIFICATION_2026-10-21.md"
   ],
   "exports": {
     "./core": {
