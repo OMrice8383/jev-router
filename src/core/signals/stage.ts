@@ -1,4 +1,5 @@
 import type { Harness, ToolOutcome } from "../types";
+import { taskFailures } from "./failure";
 import { classifyTool, type ToolSemantics } from "./tool-semantics";
 
 /**
@@ -55,7 +56,10 @@ function repeatKey(o: ToolOutcome): string {
 
 export function scoreStage(ledger: readonly (readonly ToolOutcome[])[], harness: Harness, opts: StageOptions): StageScore {
   const windowSize = Math.max(1, opts.recentTurnWindow ?? 3);
-  const batches = ledger.filter((b) => b.length > 0).slice(-windowSize);
+  const batches = ledger
+    .map(taskFailures)
+    .filter((b) => b.length > 0)
+    .slice(-windowSize);
   if (batches.length === 0) return ABSTAIN;
 
   let weightTotal = 0;

@@ -79,7 +79,7 @@ Client-visible model ids. `auto` is the generic route, and any `<prefix>/auto` m
 |---|---|---|
 | `default` | required | Candidate used when nothing else applies; must be in `order` |
 | `order` | by `price.in` | The candidates this policy may use, cheapest first; the ladder for `up`, `at_least`, and escalation. A subset keeps, say, plan-backed Claude models out of the gateway policy; rule targets must be in it |
-| `min_confidence` | 0.6 | Below this, on any choice or score answer a rule depends on, the current tier is kept |
+| `min_confidence` | 0.6 | Confidence required for each rule’s choice/score inputs. Uncertain rules are skipped; a confident matching model rule can still apply. Without one, low overall confidence retains the tier, or uses the default at a Pi/Claude Task boundary |
 | `hold_turns` | 2 | Turns a forced escalation is held |
 | `confidence_threshold` | 0.5 | Ambiguous band for the deterministic tool-signal score. Must be at least 0.462, the value one axis alone can reach |
 | `recent_turn_window` | 3 | Tool-outcome batches considered by the scorer |
@@ -134,7 +134,7 @@ Rules are evaluated in order. Expressions use a tiny language: identifiers, numb
 
 Identifiers the engine always provides: `harness`, `request_class`, `has_images`, `is_new_user_turn`, `est_tokens`, `consecutive_failures`, `requested_effort`, and the deterministic tool signals `signal.score`, `signal.severity`, `signal.spinning`, `signal.exploring`, `signal.production`. On plan-billed egresses, once observed: `plan_5h` and `plan_7d`, the five-hour and seven-day window utilization from 0 to 1 (see [Plan windows](#plan-windows)).
 
-Judge answers by question id. Task phase, asked on each new user turn: `difficulty` (score 0 to 3), `needs_reasoning` (probability), `stakes` (score 0 to 3), `output_kind` (choice: `short_answer`, `code_edit`, `long_generation`, `plan`, `tool_plan`), `long_context` (probability). Execution phase, asked when the tool signals are ambiguous: `tools_failed`, `spinning`, `producing` (probabilities). Choice and score answers also expose `<id>.confidence`.
+Judge answers by question id. Task phase, asked on each new user turn: `difficulty` (score 0 to 3), `needs_reasoning` (probability), `stakes` (score 0 to 3), `output_kind` (choice: `short_answer`, `code_edit`, `long_generation`, `plan`, `critical_design_review`, `tool_plan`), `long_context` (probability). Execution phase, asked when the tool signals are ambiguous: `tools_failed`, `spinning`, `producing` (probabilities). Choice and score answers also expose `<id>.confidence`.
 
 Actions:
 

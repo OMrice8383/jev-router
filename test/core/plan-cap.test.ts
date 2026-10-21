@@ -98,8 +98,12 @@ describe("at_most", () => {
     expect(lease.session.current?.candidate).toBe("mid");
 
     const override = plan({
-      request: req({ contextCompacted: true, planWindow: { fiveHour: 0.97 } }),
-      session: { ...emptySession(), current: { candidate: "mid", lease: "tool_chain", sinceTurn: 0 } },
+      request: req({
+        isNewUserTurn: false,
+        toolOutcomes: [{ name: "Bash", isError: true, errorText: "assertion failed" }],
+        planWindow: { fiveHour: 0.97 },
+      }),
+      session: { ...emptySession(), consecutiveFailures: 2, current: { candidate: "mid", lease: "tool_chain", sinceTurn: 0 } },
       policy,
       policyId: "default",
     });

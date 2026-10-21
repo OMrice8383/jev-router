@@ -1,3 +1,4 @@
+import { taskFailures } from "./signals/failure";
 import type { CurrentAssignment, LastUsage, NormalizedRequest, SessionState } from "./types";
 
 const LEDGER_MAX_BATCHES = 20;
@@ -13,13 +14,20 @@ export interface AdvanceOptions {
 
 /** Returns the session state after processing `request` with the given assignment. Pure. */
 export function advanceSession(session: SessionState, request: NormalizedRequest, opts: AdvanceOptions): SessionState {
-  const batch = request.toolOutcomes;
+  const batch = taskFailures(request.toolOutcomes);
   const ledger = batch.length > 0 ? [...session.ledger, batch].slice(-LEDGER_MAX_BATCHES) : session.ledger;
   const consecutiveFailures =
-    batch.length === 0 ? session.consecutiveFailures : batch.every((o) => o.isError) ? session.consecutiveFailures + 1 : 0;
+    batch.length === 0
+      ? request.toolOutcomes.length > 0
+        ? 0
+        : session.consecutiveFailures
+      : batch.every((o) => o.isError)
+        ? session.consecutiveFailures + 1
+        : 0;
   const next: SessionState = {
     turn: session.turn + 1,
     ledger,
+    ...(request.work ? { work: request.work } : session.work ? { work: session.work } : {}),
     consecutiveFailures,
     ...(opts.current !== undefined ? { current: opts.current } : session.current !== undefined ? { current: session.current } : {}),
     ...(opts.holdUntilTurn !== undefined

@@ -6,26 +6,29 @@ export function taskPhaseQuestions(): Readonly<Record<string, Question>> {
   return {
     difficulty: {
       type: "score",
-      instructions: "How hard is this request for a coding agent to complete correctly?",
+      instructions:
+        "Rate the reasoning, uncertainty and unclear causes in the CURRENT operation described by work.goal, phase and nextAction. File count, project importance and a PM role are not difficulty. Following a confirmed design can be routine even across many files.",
       criteria: [
-        "Trivial: an acknowledgement, a lookup, or a one-line answer",
-        "Routine: a bounded edit or task with an obvious approach",
-        "Substantial: multi-file changes or debugging that need judgment",
-        "Deep: architecture, tricky debugging, design, or research with unclear path",
+        "Trivial: a bounded check, lookup or mechanical operation with a known answer",
+        "Routine: ordinary implementation or investigation with a clear approach and checkable results",
+        "Substantial: unresolved alternatives or a cause requiring nontrivial reasoning, but a bounded investigation",
+        "Deep: difficult design trade-offs, unexplained failures, or task evidence that the middle tier could not solve it",
       ],
     },
     needs_reasoning: {
       type: "noul",
-      instructions: "Does getting this right require extended step-by-step reasoning rather than pattern matching?",
+      instructions:
+        "Does the CURRENT next operation require extended reasoning? Judge reasoning effort separately from model capability. A capable model need not use high effort. Confirmed implementation steps and routine checks normally do not need high effort.",
     },
     stakes: {
       type: "score",
-      instructions: "How costly is a wrong or sloppy answer here?",
+      instructions:
+        "Rate the actual blast radius, reversibility and verifiability of THIS operation, not the importance of the whole project. Local code/build/test changes are not equivalent to irreversible production data operations. Important security design or review belongs in critical_design_review; routine implementation of an approved design does not.",
       criteria: [
-        "Cosmetic: easily noticed and undone",
-        "Rework: wastes time but nothing breaks",
-        "Breaks things: builds, tests, data, or user-facing behavior",
-        "Critical: security, auth, payments, migrations, or irreversible actions",
+        "Cosmetic/read-only: easily inspected and undone, no consequential external effect",
+        "Local reversible: isolated implementation or tests, with a clear check and rollback",
+        "Bounded consequential change: a wider but reversible effect with validation and recovery available",
+        "Critical operation: broad or irreversible production/auth/payment/data effects with weak verification or rollback",
       ],
     },
     output_kind: {
@@ -35,7 +38,9 @@ export function taskPhaseQuestions(): Readonly<Record<string, Question>> {
         short_answer: "A brief textual answer or confirmation",
         code_edit: "Changes to existing code",
         long_generation: "A large new artifact such as a module, document, or test suite",
-        plan: "An analysis, design, or plan rather than code",
+        plan: "An ordinary analysis, design, or plan rather than code",
+        critical_design_review:
+          "Design, a consequential decision, or review of authentication, authorization, payments, migration or other critical boundaries; not routine approved implementation or a check against a settled procedure",
         tool_plan: "A sequence of tool actions such as running commands or inspecting files",
       },
     },
@@ -46,8 +51,15 @@ export function taskPhaseQuestions(): Readonly<Record<string, Question>> {
 /** Asked only when the deterministic tool-signal score is ambiguous, against the recent tool digest. */
 export function executionPhaseQuestions(): Readonly<Record<string, Question>> {
   return {
-    tools_failed: { type: "noul", instructions: "Did the most recent tool calls fail or produce errors that block progress?" },
-    spinning: { type: "noul", instructions: "Is the agent repeating the same actions without making progress?" },
+    tools_failed: {
+      type: "noul",
+      instructions:
+        "Did code/logic attempts fail? Do not count 429, connectivity, expired credentials, unavailable dependencies or service outages as reasoning failures.",
+    },
+    spinning: {
+      type: "noul",
+      instructions: "Is the agent stuck after repeated code/reasoning attempts, rather than waiting or retrying an infrastructure failure?",
+    },
     producing: { type: "noul", instructions: "Is the agent now writing or editing files rather than exploring or planning?" },
   };
 }

@@ -5,6 +5,7 @@ import type { DecisionRecord } from "../core/record";
 import type { Harness, RequestClass, ToolOutcome } from "../core/types";
 import type { FetchLike } from "../judge/http";
 import type { Judge } from "../judge/types";
+import { policyFingerprint, ROUTING_REVISION } from "../runtime/policy-identity";
 import { corsResponseHeaders, isPreflight, preflightHeaders } from "./cors";
 import { DIALECTS } from "./dialects";
 import { isGeminiGeneratePath } from "./dialects/gemini";
@@ -170,6 +171,7 @@ function bodyFromDecidePayload(raw: JsonObject): NormalizedBody {
     requestedModel: typeof r.requestedModel === "string" ? r.requestedModel : "auto",
     isNewUserTurn: r.isNewUserTurn !== false,
     ...(typeof r.lastUserText === "string" ? { lastUserText: r.lastUserText } : {}),
+    ...(typeof r.taskText === "string" ? { taskText: r.taskText.slice(-4000) } : {}),
     ...(typeof r.assistantIntentTail === "string" ? { assistantIntentTail: r.assistantIntentTail } : {}),
     toolNames: Array.isArray(r.toolNames) ? r.toolNames.filter((t): t is string => typeof t === "string") : [],
     hasImages: r.hasImages === true,
@@ -184,6 +186,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const env = opts.env ?? process.env;
   const now = opts.now ?? (() => Date.now());
   const store = new SessionStore();
+  const loadedPolicyHash = policyFingerprint(opts.policy);
+  let activeRequests = 0;
   const planWindows = new PlanWindowStore();
   const board = new StatusBoard(opts.policy, now);
   const log = opts.log ?? (() => undefined);
@@ -197,7 +201,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       } catch (e) {
         console.error(`jev-router: status not updated: ${e instanceof Error ? e.message : String(e)}`);
       }
-      log(record);
+      log({ ...record, loadedPolicyHash, routingRevision: ROUTING_REVISION });
     },
     now,
     randomId: opts.randomId ?? (() => crypto.randomUUID()),
@@ -241,7 +245,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       return;
     }
     if (method === "GET" && path === "/healthz") {
-      sendJson(res, 200, JSON.stringify({ ok: true, sessions: store.size }));
+      sendJson(
+        res,
+        200,
+        JSON.stringify({ ok: true, sessions: store.size, policyHash: loadedPolicyHash, routingRevision: ROUTING_REVISION, activeRequests }),
+      );
       return;
     }
     if (method === "GET" && path === "/status") {
@@ -253,6 +261,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       return;
     }
 
+    activeRequests += 1;
+    let counted = true;
+    const finished = () => {
+      if (counted) {
+        counted = false;
+        activeRequests -= 1;
+      }
+    };
+    res.once("finish", finished);
+    res.once("close", finished);
     const mounted = findMount(opts.policy, path);
     if (mounted && method !== "POST") {
       await proxy(relayDeps, mounted, {
@@ -432,7 +450,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
     store,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
+        // Do not sever an in-flight Claude turn during a rolling relay update.
         server.close(() => resolve());
       }),
   };

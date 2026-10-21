@@ -1,0 +1,26 @@
+{
+  "claude": {
+    "default": "claude-sonnet",
+    "rules": [
+      { "when": "true", "then": { "effort": "medium" } },
+      { "when": "needs_reasoning >= 0.8", "then": { "effort": "high" } },
+      { "when": "difficulty >= 2.6", "then": { "pin": "claude-opus" } },
+      { "when": "output_kind == 'critical_design_review'", "then": { "pin": "claude-opus" } },
+      { "when": "difficulty < 1 and stakes < 2.5 and needs_reasoning < 0.5 and output_kind in [short_answer, tool_plan, code_edit]", "then": { "pin": "claude-haiku", "effort": "low" } },
+      { "when": "spinning > 0.7 or (tools_failed > 0.7 and spinning > 0.5)", "then": { "up": 1 } },
+      { "when": "producing > 0.8 and tools_failed < 0.2", "then": { "allow_down": true } }
+    ]
+  },
+  "pi": {
+    "default": "pi-sol",
+    "rules": [
+      { "when": "true", "then": { "effort": "medium" } },
+      { "when": "needs_reasoning >= 0.8", "then": { "effort": "high" } },
+      { "when": "difficulty >= 2.6", "then": { "pin": "pi-sol" } },
+      { "when": "output_kind == 'critical_design_review'", "then": { "pin": "pi-sol" } },
+      { "when": "difficulty < 1 and stakes < 2.5 and needs_reasoning < 0.5 and output_kind in [short_answer, tool_plan, code_edit]", "then": { "pin": "pi-luna", "effort": "medium" } },
+      { "when": "spinning > 0.7 or (tools_failed > 0.7 and spinning > 0.5)", "then": { "up": 1 } },
+      { "when": "producing > 0.8 and tools_failed < 0.2", "then": { "allow_down": true } }
+    ]
+  }
+}

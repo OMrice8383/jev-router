@@ -1,6 +1,7 @@
 > **Downstream fork (not the upstream npm release).** Compatibility repairs and verification limits: [DOWNSTREAM_SETUP](docs/DOWNSTREAM_SETUP.md). No existing agent settings are changed by cloning or building.
 >
 > 起動ごとの実モデル選択記録・確認・戻し方: [LAUNCH_AUDIT](docs/LAUNCH_AUDIT.md)。
+> Task別の判断・設定適用・実読込確認: [TASK_ROUTING](docs/TASK_ROUTING.md)。
 
 # jev-router
 
@@ -68,11 +69,11 @@ Edit `~/.jev-router/policy.json` to change models, prices, or rules. `jev-router
 
 ## How it decides
 
-1. **Hard overrides.** A request right after context compaction, three consecutive all-failure tool batches, or a critical error escalates one tier and holds it for two turns.
-2. **Holds and leases.** A clean tool continuation reuses the last decision. Nothing is re-judged mid-chain unless something went wrong.
-3. **Tool signals.** Recent tool outcomes are scored the way NVIDIA's Switchyard does it: error severity, spinning, and exploring push toward a capable model, steady production pushes toward a cheap one. A decisive score skips the judge.
-4. **The judge.** On a new user turn, or when the signals are ambiguous, one jev call answers five task questions or three execution questions against a bounded summary. jev never sees the full conversation. It costs about three thousandths of a cent and returns in a few hundred milliseconds.
-5. **Policy.** Plain rules map the answers to a candidate and an effort. Low confidence on a question a rule depends on keeps the current tier.
+1. **Hard overrides.** Three consecutive task-failure tool batches escalate one tier and hold it for two turns. Compaction and exception text alone do not force escalation; infrastructure failures are excluded.
+2. **Holds and leases.** A clean tool continuation reuses the last decision. Pi/Claude Task changes, explicit phase changes and problem resolution trigger reassessment rather than inheriting an old hold.
+3. **Tool signals.** Recent outcomes combine error severity, spinning, exploration and production. For Pi/Claude, a capability increase from this score also needs at least two task errors in the recent window. A decisive qualified score skips the judge.
+4. **The judge.** On a new user turn, a Pi/Claude Task or phase boundary, or when the signals are ambiguous, one jev call answers five task questions or three execution questions against a bounded summary. jev never sees the full conversation. It costs about three thousandths of a cent and returns in a few hundred milliseconds.
+5. **Policy.** Rules select capability and reasoning effort separately. Each matching rule checks confidence in its own inputs. With uncertain judging and no trusted model rule, retain the current tier; at a Pi/Claude Task boundary, use the policy default instead.
 6. **Switch cost.** An escalation first raises reasoning effort on the current model and changes model only once effort is maxed out. A downgrade that would drop more prompt cache than it saves over the next few turns is skipped. Stakes rules and hard overrides still switch at once. On a plan, caps on the five-hour window's usage come last and bound every step above.
 
 Every decision is one line in `~/.jev-router/decisions.jsonl`: raw answers, the decision and its reasons, whether it took effect, the tokens the upstream reported, and the cost on every other candidate.

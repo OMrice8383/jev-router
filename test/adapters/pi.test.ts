@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PiRouter, type PiRouterDeps } from "../../src/adapters/pi/router";
+import type { Dossier } from "../../src/core/dossier";
 import { loadPolicy } from "../../src/core/policy";
 import type { Effort, LastUsage } from "../../src/core/types";
 import { MockJudge } from "../../src/judge/mock";
@@ -238,7 +239,18 @@ describe("pi adapter regressions", () => {
   });
 
   test("usage stays on the served model when the continuation switches to another candidate", async () => {
-    const { router, calls } = harness(new MockJudge(midAnswers));
+    let callsToJudge = 0;
+    const { router, calls } = harness(
+      new MockJudge(() =>
+        ++callsToJudge === 1
+          ? midAnswers
+          : {
+              ...midAnswers,
+              difficulty: { type: "score", score: 3.5, probabilities: {}, confidence: 0.95 },
+              stakes: { type: "score", score: 2.5, probabilities: {}, confidence: 0.95 },
+            },
+      ),
+    );
     await router.onBeforeAgentStart({ prompt: "refactor" });
     router.onSessionCompact();
     await router.onTurnEnd({ usage, toolResults: [{ toolName: "read", isError: false }] });
@@ -422,14 +434,15 @@ describe("pi router", () => {
     expect(calls.setThinking).toEqual(["high"]);
   });
 
-  test("compaction escalates the next request", async () => {
+  test("compaction rejudges the current task without automatically escalating", async () => {
     const judge = new MockJudge(midAnswers);
     const { router, calls } = harness(judge);
     await router.onBeforeAgentStart({ prompt: "start", images: [] });
     router.onSessionCompact();
     await router.onTurnEnd({ assistantText: "continuing", toolResults: [{ toolName: "read", isError: false, text: "..." }] });
     await router.onTurnEnd({ toolResults: [] });
-    expect(calls.log.at(-1)!.decision).toMatchObject({ source: "override", candidate: "frontier" });
+    expect(calls.log.at(-1)!.decision).toMatchObject({ source: "judge", candidate: "mid" });
+    expect(judge.requests).toHaveLength(2);
   });
 
   test("a rejected model switch is logged, reported, and leaves session state uncommitted", async () => {
@@ -449,7 +462,7 @@ describe("pi router", () => {
     expect(calls.notify.some((m) => m.includes("provider exploded"))).toBe(true);
   });
 
-  test("a compaction reported while a request is in flight still escalates the next request", async () => {
+  test("a compaction reported in flight is still consumed by the next reevaluation", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((r) => {
       release = r;
@@ -467,7 +480,45 @@ describe("pi router", () => {
     await first;
     await router.onTurnEnd({ toolResults: [{ toolName: "read", isError: false, text: "..." }] });
     await router.onTurnEnd({ toolResults: [] });
-    expect(calls.log.at(-1)!.decision).toMatchObject({ source: "override" });
+    expect(calls.log.at(-1)!.decision).toMatchObject({ source: "judge", candidate: "mid" });
+  });
+
+  test("resume uses existing task purpose and latest phase even for a continue-only prompt", async () => {
+    const judge = new MockJudge(midAnswers);
+    const { router } = harness(judge);
+    router.onSessionStart(
+      "resume",
+      "Goal: Diagnose the existing parser failure\nPhase: investigation\nDone: regression passes",
+      "Phase: implementation\nNext action: Apply the confirmed fix",
+    );
+    await router.onBeforeAgentStart({ prompt: "続けて" });
+    expect((judge.requests[0]?.state as Dossier | undefined)?.work).toMatchObject({
+      goal: "Diagnose the existing parser failure",
+      phase: "implementation",
+    });
+  });
+
+  test("a new task may apply the configured baseline on judge failure instead of retaining old frontier/high", async () => {
+    let current: Ref = frontier;
+    let effort: Effort = "high";
+    const raw = minimalPolicy();
+    raw.candidates.fast.effort = ["low", "medium", "high"];
+    raw.candidates.fast.default_effort = "medium";
+    const { router } = harness(new MockJudge({}), {
+      policy: loadPolicy(raw),
+      currentModel: () => current,
+      currentThinkingLevel: () => effort,
+      setModel: async (m) => {
+        current = m;
+        return true;
+      },
+      setThinkingLevel: (level) => {
+        effort = level;
+      },
+    });
+    await router.onBeforeAgentStart({ prompt: "Task: ROUTE-G1-T2\nGoal: Apply a confirmed local change\nPhase: implementation" });
+    expect(current.id).toBe("openai/gpt-5.4-mini");
+    expect(String(effort)).toBe("medium");
   });
 
   test("zero context tokens fall back to a character estimate", async () => {

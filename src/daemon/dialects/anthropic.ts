@@ -1,15 +1,6 @@
-import type { Decision, Effort, ToolOutcome } from "../../core/types";
-import {
-  asEffort,
-  asString,
-  type DialectAdapter,
-  EXCERPT_TAIL_CHARS,
-  isObject,
-  type JsonObject,
-  type NormalizedBody,
-  TEXT_TAIL_CHARS,
-  tail,
-} from "./types";
+import type { Decision, Effort, NormalizedRequest, ToolOutcome } from "../../core/types";
+import { headAndTail, isContinuation, updateWorkContext, type WorkContext } from "../../core/work";
+import { asEffort, asString, type DialectAdapter, EXCERPT_TAIL_CHARS, isObject, type JsonObject, type NormalizedBody, tail } from "./types";
 
 /** Anthropic accepts low, medium, high, xhigh, and max; minimal maps to low. */
 const ANTHROPIC_EFFORT: Readonly<Record<Effort, string>> = {
@@ -99,8 +90,20 @@ export const anthropicDialect: DialectAdapter = {
       : [];
     const toolUseNames = new Map<string, string>();
     let lastUserText: string | undefined;
+    let taskText: string | undefined;
     let assistantIntentTail: string | undefined;
     let hasImages = false;
+    let historicalWork: WorkContext | undefined;
+    const contextRequest: NormalizedRequest = {
+      harness: "claude-code",
+      sessionKey: "history",
+      requestedModel: "auto",
+      isNewUserTurn: true,
+      toolNames: [],
+      hasImages: false,
+      estimatedInputTokens: 0,
+      toolOutcomes: [],
+    };
 
     for (const m of messages) {
       for (const b of blocks(m.content)) {
@@ -109,12 +112,33 @@ export const anthropicDialect: DialectAdapter = {
         if (b.type === "tool_result") for (const inner of blocks(b.content)) if (inner.type === "image") hasImages = true;
       }
       if (m.role === "user") {
-        const t = textOf(m.content);
-        if (t) lastUserText = t;
+        const t = textOf(m.content)
+          .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+          .trim();
+        if (t) {
+          lastUserText = t;
+          if (!isContinuation(t)) historicalWork = updateWorkContext(historicalWork, { ...contextRequest, lastUserText: t }).work;
+        }
       } else if (m.role === "assistant") {
         const t = textOf(m.content);
-        if (t) assistantIntentTail = tail(t, TEXT_TAIL_CHARS);
+        if (t) {
+          assistantIntentTail = headAndTail(t, 2000);
+          if (historicalWork)
+            historicalWork = updateWorkContext(historicalWork, { ...contextRequest, isNewUserTurn: false, assistantIntentTail }).work;
+        }
       }
+    }
+    if (historicalWork) {
+      taskText = [
+        `Task: ${historicalWork.id ?? ""}`,
+        `Goal: ${historicalWork.goal}`,
+        `Phase: ${historicalWork.phase}`,
+        `Next action: ${historicalWork.nextAction}`,
+        `Done: ${historicalWork.completion}`,
+        `Targets: ${historicalWork.targets}`,
+      ]
+        .map((line) => line.replace(/\s+/g, " "))
+        .join("\n");
     }
 
     // Native Claude may append runtime system messages after the user or tool result.
@@ -139,6 +163,7 @@ export const anthropicDialect: DialectAdapter = {
       requestedModel: asString(body.model) ?? "",
       isNewUserTurn,
       ...(lastUserText !== undefined ? { lastUserText } : {}),
+      ...(taskText !== undefined ? { taskText } : {}),
       ...(assistantIntentTail !== undefined ? { assistantIntentTail } : {}),
       toolNames,
       hasImages,

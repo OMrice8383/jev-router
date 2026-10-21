@@ -7,6 +7,7 @@ export interface NormalizedBody {
   readonly requestedModel: string;
   readonly isNewUserTurn: boolean;
   readonly lastUserText?: string;
+  readonly taskText?: string;
   readonly assistantIntentTail?: string;
   readonly toolNames: readonly string[];
   readonly hasImages: boolean;

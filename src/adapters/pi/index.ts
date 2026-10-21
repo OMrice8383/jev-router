@@ -1,11 +1,13 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Policy } from "../../core/policy/types";
+import { isContinuation } from "../../core/work";
 import { applyEnv, envFilePath, loadEnvFile } from "../../runtime/envfile";
 import { createJudge } from "../../runtime/judge-factory";
 import { JsonlLogger } from "../../runtime/log";
 import { decisionsLogPath, resolvePolicyPath } from "../../runtime/paths";
 import { readPolicyFile } from "../../runtime/policy-file";
+import { policyFingerprint, ROUTING_REVISION } from "../../runtime/policy-identity";
 import { PiRouter } from "./router";
 
 type PiModel = Model<Api>;
@@ -30,6 +32,7 @@ function textOf(content: readonly { type: string; text?: string }[]): string {
 export default function jevRouterExtension(pi: ExtensionAPI): void {
   let router: PiRouter<PiModel> | undefined;
   let logger: JsonlLogger | undefined;
+  let loadedPolicyHash = "";
 
   async function boot(ctx: ExtensionContext, reason: string): Promise<void> {
     try {
@@ -40,6 +43,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
       applyEnv(env, await loadEnvFile(envFilePath(env)));
       const policyPath = await resolvePolicyPath(env);
       const policy = await readPolicyFile(policyPath);
+      loadedPolicyHash = policyFingerprint(policy);
       const judge = createJudge(policy.judge, env);
       logger = new JsonlLogger(decisionsLogPath(env));
       const log = logger;
@@ -55,12 +59,30 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
         getActiveTools: () => pi.getActiveTools(),
         getContextTokens: () => ctx.getContextUsage()?.tokens ?? null,
         notify: (message, level) => ctx.ui.notify(message, level),
-        status: (text) => ctx.ui.setStatus("jev-router", text),
-        log: (record) => log.write({ ...record, ...(env.JEV_ROUTER_LAUNCH_ID ? { launchId: env.JEV_ROUTER_LAUNCH_ID } : {}) }),
+        status: (text) => ctx.ui.setStatus("jev-router", text ? `${text} · ta1:${loadedPolicyHash.slice(0, 8)}` : undefined),
+        log: (record) =>
+          log.write({
+            ...record,
+            loadedPolicyHash,
+            routingRevision: ROUTING_REVISION,
+            ...(env.JEV_ROUTER_LAUNCH_ID ? { launchId: env.JEV_ROUTER_LAUNCH_ID } : {}),
+          }),
         now: () => Date.now(),
         randomId: () => crypto.randomUUID(),
       });
-      router.onSessionStart(reason);
+      const branch = ctx.sessionManager?.getBranch?.() ?? [];
+      const userText = branch
+        .filter((entry) => entry.type === "message" && entry.message.role === "user")
+        .map((entry) => {
+          if (entry.type !== "message" || entry.message.role !== "user") return "";
+          return typeof entry.message.content === "string" ? entry.message.content : textOf(entry.message.content);
+        })
+        .filter((text) => text && !isContinuation(text))
+        .at(-1);
+      const lastAssistant = branch.filter((entry) => entry.type === "message" && entry.message.role === "assistant").at(-1);
+      const intent =
+        lastAssistant?.type === "message" && lastAssistant.message.role === "assistant" ? textOf(lastAssistant.message.content) : undefined;
+      router.onSessionStart(reason, userText, intent);
     } catch (e) {
       router = undefined;
       ctx.ui.notify(`jev-router disabled: ${e instanceof Error ? e.message : String(e)}`, "warning");
@@ -120,7 +142,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
       }
       if (verb === "on") router.setEnabled(true);
       else if (verb === "off") router.setEnabled(false);
-      ctx.ui.notify(router.statusText(), "info");
+      ctx.ui.notify(`${router.statusText()}\nloaded_policy=${loadedPolicyHash}\nrouting_revision=${ROUTING_REVISION}`, "info");
     },
   });
 }

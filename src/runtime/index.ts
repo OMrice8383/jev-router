@@ -11,3 +11,4 @@ export { chooseOllamaModel, detectOllama } from "./ollama";
 export type { Env } from "./paths";
 export { configDir, decisionsLogPath, resolvePolicyPath } from "./paths";
 export { readPolicyFile } from "./policy-file";
+export { policyFingerprint, ROUTING_REVISION } from "./policy-identity";

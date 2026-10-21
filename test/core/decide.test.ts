@@ -75,14 +75,15 @@ describe("plan: deterministic paths", () => {
     expect(out.session.consecutiveFailures).toBe(3);
   });
 
-  test("post-compaction request escalates with a hold", () => {
+  test("post-compaction request rejudges the task instead of forcing an escalation", () => {
     const session: SessionState = { ...emptySession(), turn: 9, current: { candidate: "fast", lease: "one_call", sinceTurn: 0 } };
     const out = plan({ request: req({ isNewUserTurn: false, contextCompacted: true }), session, policy, policyId: "default" });
-    expect(out.kind).toBe("decision");
-    if (out.kind !== "decision") return;
-    expect(out.decision.candidate).toBe("mid");
-    expect(out.decision.source).toBe("override");
-    expect(out.decision.reasons).toContain("context_compacted");
+    expect(out.kind).toBe("judge");
+    if (out.kind !== "judge") return;
+    const result = out.conclude({ difficulty: score(0), stakes: score(0), needs_reasoning: noul(0) });
+    expect(result.decision.candidate).toBe("fast");
+    expect(result.decision.source).toBe("judge");
+    expect(result.session.holdUntilTurn).toBeUndefined();
   });
 
   test("an active hold blocks de-escalation", () => {
