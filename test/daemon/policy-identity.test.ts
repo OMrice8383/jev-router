@@ -29,7 +29,7 @@ test("health identifies the policy actually held in memory and counts active req
   let request: Promise<Response> | undefined;
   try {
     const health = await (await fetch(daemon.url + "/healthz")).json();
-    expect(health.routingRevision).toBe("task-aware-v1");
+    expect(health.routingRevision).toBe("task-aware-v2");
     expect(health.policyHash).toMatch(/^[a-f0-9]{64}$/);
     expect(health.activeRequests).toBe(0);
     request = fetch(daemon.url + "/v1/messages", {

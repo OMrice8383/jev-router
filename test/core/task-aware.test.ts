@@ -153,6 +153,67 @@ test("an explicit phase-only instruction keeps the task purpose and completion c
     expect(p.judgeRequest.state.work?.phase).toBe("implementation");
   }
 });
+test("a Japanese phase-only instruction preserves the goal, completion criteria, and targets", () => {
+  const p = plan({
+    request: req({ lastUserText: "現在工程：実装\n次の操作：確認済みの修正を適用する" }),
+    session: difficultSession(),
+    policy,
+    policyId: "claude",
+  });
+  expect(p.kind).toBe("judge");
+  if (p.kind === "judge") {
+    expect(p.judgeRequest.state.work).toMatchObject({
+      id: "ROUTE-G1-T1",
+      goal: "Diagnose an unexplained parser hang",
+      completion: "a reproducer and verified fix",
+      targets: "src/parser.ts",
+      phase: "implementation",
+      nextAction: "確認済みの修正を適用する",
+    });
+    expect(p.conclude(answers()).decision.reasons).toContain("task_boundary:phase_change");
+  }
+});
+test("a Japanese continuation retains the task purpose on judge failure", () => {
+  const p = plan({
+    request: req({ lastUserText: "続けてください" }),
+    session: difficultSession(),
+    policy,
+    policyId: "claude",
+  });
+  expect(p.kind).toBe("judge");
+  if (p.kind === "judge") {
+    expect(p.judgeRequest.state.work).toMatchObject({
+      id: "ROUTE-G1-T1",
+      goal: "Diagnose an unexplained parser hang",
+      phase: "investigation",
+      nextAction: "isolate the cause",
+      completion: "a reproducer and verified fix",
+      targets: "src/parser.ts",
+    });
+    const result = p.conclude(null);
+    expect(result.decision).toMatchObject({ candidate: "claude-opus", effort: "high" });
+    expect(result.decision.reasons).not.toContain("task_boundary:new_task");
+  }
+});
+test("a changed explicit Task ID resets the old failure counter even when the purpose is unchanged", () => {
+  const session: SessionState = { ...difficultSession(), consecutiveFailures: 3 };
+  const p = plan({
+    request: req({
+      lastUserText:
+        "Task: ROUTE-G1-T2\nGoal: Diagnose an unexplained parser hang\nPhase: investigation\nNext action: isolate the cause\nDone: a reproducer and verified fix\nTargets: src/parser.ts",
+    }),
+    session,
+    policy,
+    policyId: "claude",
+  });
+  expect(p.kind).toBe("judge");
+  if (p.kind === "judge") {
+    expect(p.judgeRequest.state.work).toMatchObject({ id: "ROUTE-G1-T2", goal: "Diagnose an unexplained parser hang" });
+    const result = p.conclude(answers());
+    expect(result.decision.reasons).toContain("task_boundary:new_task");
+    expect(result.session.consecutiveFailures).toBe(0);
+  }
+});
 test("the latest user phase and next operation override old assistant preambles", () => {
   const p = plan({
     request: req({
@@ -221,6 +282,46 @@ test("one traceback followed by source reading is not proof that the middle mode
         .decision.candidate,
     ).toBe("claude-sonnet");
 });
+test("a short auth-design follow-up keeps the original task and protection", () => {
+  const session = judge(
+    req({ lastUserText: "Task: APP-G1-T02\nGoal: Design the authorization boundary for tenant admins\nPhase: design" }),
+    emptySession(),
+    null,
+  ).session;
+  const result = judge(req({ lastUserText: "What about refresh tokens?" }), session, null);
+  expect(result.session.work).toMatchObject({
+    id: "APP-G1-T02",
+    goal: "Design the authorization boundary for tenant admins",
+    phase: "design",
+    criticalDesign: true,
+  });
+  expect(result.decision.candidate).toBe("claude-opus");
+  expect(result.decision.reasons).not.toContain("task_boundary:new_task");
+});
+test("unconfirmed permission assumptions remain a protected design task", () => {
+  expect(
+    judge(
+      req({
+        lastUserText:
+          "Goal: Design the authorization boundary for tenant admins\nPhase: design\nNext action: Check the unconfirmed permission assumptions and propose a boundary",
+      }),
+      emptySession(),
+      null,
+    ).decision.candidate,
+  ).toBe("claude-opus");
+});
+test.each(["implementation per decided design", "実装（決定済み設計）"])(
+  "a settled implementation phase is not misread as review: %s",
+  (phase) => {
+    const result = judge(
+      req({ lastUserText: `Goal: Implement the approved authentication design\nPhase: ${phase}` }),
+      emptySession(),
+      null,
+    );
+    expect(result.session.work).toMatchObject({ phase: "implementation", criticalDesign: false });
+    expect(result.decision.candidate).toBe("claude-sonnet");
+  },
+);
 test("compaction is not by itself a reason to raise capability", () => {
   const result = judge(
     req({ isNewUserTurn: false, lastUserText: "", contextCompacted: true, toolOutcomes: [{ name: "Read", isError: false }] }),

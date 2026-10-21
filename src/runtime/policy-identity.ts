@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Policy } from "../core/policy/types";
 
-export const ROUTING_REVISION = "task-aware-v1";
+export const ROUTING_REVISION = "task-aware-v2";
 
 /** Fingerprint the policy loaded in memory, not a possibly newer file on disk. */
 export function policyFingerprint(policy: Policy): string {

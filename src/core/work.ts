@@ -44,7 +44,8 @@ function field(text: string, labels: string): string | undefined {
 function phaseOf(text: string | undefined): WorkPhase | undefined {
   if (!text) return undefined;
   if (/^(?:complete|done|完了|終了)$/i.test(text.trim())) return "complete";
-  if (/review|decision|decide|レビュー|判断|決定/i.test(text)) return "review";
+  if (/^(?:implementation\b|実装)/i.test(text.trim())) return "implementation";
+  if (/\b(?:review|decision|decide)\b|レビュー|判断(?!済)|決定(?!済)/i.test(text)) return "review";
   if (/validation|testing|verify|検証|テスト/i.test(text)) return "validation";
   if (/implementation|implement|実装|確定済み実装/i.test(text)) return "implementation";
   if (/design|設計/i.test(text)) return "design";
@@ -67,8 +68,16 @@ export function updateWorkContext(
   const explicitId = foundId && foundId.length <= 96 ? foundId : undefined;
   const sourcePhaseText = field(source, "phase|current phase|現在工程|現在の工程|工程");
   const phaseUpdate = previous && !explicitGoal && !explicitId && (!!sourcePhaseText || /設計.{0,12}完了|原因.{0,12}判明/.test(user));
+  const followup =
+    previous &&
+    !explicitGoal &&
+    !explicitId &&
+    /^(?:what about|how about|what if|and\b|also\b|それ(?:は|なら)|その場合|追加で)/i.test(user);
   const newTask =
-    meaningful && !phaseUpdate && (!previous || (explicitId && previous.id ? explicitId !== previous.id : goal !== previous.goal));
+    meaningful &&
+    !phaseUpdate &&
+    !followup &&
+    (!previous || (explicitId && previous.id ? explicitId !== previous.id : goal !== previous.goal));
   const id = explicitId ?? (newTask ? undefined : previous?.id);
   const base = newTask ? undefined : previous;
   const intent = request.assistantIntentTail ?? "";
@@ -111,11 +120,11 @@ export function updateWorkContext(
       : undefined;
   const operation = `${work.goal} ${work.nextAction}`.replace(/\bno (?:new )?(?:design|security|migration)(?: (?:decision|change))?/gi, "");
   const routineCheck =
-    /already[- ]approved|confirmed|settled|known expected|手順|確認済|確定済|既知/i.test(operation) &&
+    /\b(?:already[- ]approved|confirmed|settled)\b|known expected|手順|確認済|確定済|既知/i.test(operation) &&
     /fixture|expected values|check the|照合|一致|テスト/i.test(operation) &&
     !/undecided|unexplained|uncertain|vulnerabilit|threat|decide whether|未確定|原因不明|判断する|脆弱/i.test(operation);
   const criticalDesign =
-    !routineCheck &&
+    (!routineCheck || actualPhase === "design") &&
     (actualPhase === "design" ||
       (actualPhase === "review" &&
         /\b(?:design|decide|decision|boundar(?:y|ies)|isolation|rollback)\b|設計|境界|分離|重大|不可逆|判断/i.test(operation))) &&
