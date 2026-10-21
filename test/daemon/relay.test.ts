@@ -163,6 +163,7 @@ describe("relay: anthropic messages", () => {
         "x-api-key": "client-key",
         authorization: "Bearer client-token",
         "x-claude-code-session-id": "sess-1",
+        "x-jev-router-launch-id": "11111111-1111-4111-8111-111111111111",
         "user-agent": "claude-cli/2.1.300 (external, cli)",
       },
       body: JSON.stringify(anthropicBody()),
@@ -185,6 +186,7 @@ describe("relay: anthropic messages", () => {
     expect(up.headers.authorization).toBe("Bearer up-secret");
     expect(up.headers["x-api-key"]).toBe("up-secret");
     expect(up.headers["accept-encoding"]).toBe("identity");
+    expect(up.headers["x-jev-router-launch-id"]).toBeUndefined();
     const body = up.body as Record<string, unknown>;
     expect(body.model).toBe("anthropic/claude-sonnet-5");
     expect(JSON.stringify(body.system)).toBe(JSON.stringify(anthropicBody().system));
@@ -195,6 +197,7 @@ describe("relay: anthropic messages", () => {
     expect(records[0]!.apply).toMatchObject({ ok: true });
     expect(records[0]!.usage).toMatchObject({ inputTokens: 12, outputTokens: 7 });
     expect(records[0]!.session).toBe("cc:sess-1");
+    expect(records[0]!.launchId).toBe("11111111-1111-4111-8111-111111111111");
   });
 
   test("a second request in the same session reuses the lease without a judge call", async () => {

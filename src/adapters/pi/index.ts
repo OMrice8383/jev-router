@@ -56,7 +56,7 @@ export default function jevRouterExtension(pi: ExtensionAPI): void {
         getContextTokens: () => ctx.getContextUsage()?.tokens ?? null,
         notify: (message, level) => ctx.ui.notify(message, level),
         status: (text) => ctx.ui.setStatus("jev-router", text),
-        log: (record) => log.write(record),
+        log: (record) => log.write({ ...record, ...(env.JEV_ROUTER_LAUNCH_ID ? { launchId: env.JEV_ROUTER_LAUNCH_ID } : {}) }),
         now: () => Date.now(),
         randomId: () => crypto.randomUUID(),
       });

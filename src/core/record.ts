@@ -15,6 +15,8 @@ export interface JudgeTrace {
 /** One line of the decision log. Content-free by construction: digests and vocabularies only. */
 export interface DecisionRecord {
   readonly id: string;
+  /** Local launch correlation only; never forwarded to an upstream. */
+  readonly launchId?: string;
   readonly ts: number;
   readonly session: string;
   readonly harness: Harness;
@@ -79,6 +81,7 @@ export interface TokenUsage {
 
 export interface RecordInput {
   readonly id: string;
+  readonly launchId?: string;
   readonly ts: number;
   readonly request: NormalizedRequest;
   /** Session state after the decision was applied. */
@@ -96,6 +99,7 @@ export function buildDecisionRecord(input: RecordInput): DecisionRecord {
   const { request, stage } = input;
   return {
     id: input.id,
+    ...(input.launchId ? { launchId: input.launchId } : {}),
     ts: input.ts,
     session: request.sessionKey,
     harness: request.harness,

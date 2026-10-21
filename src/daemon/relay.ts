@@ -165,10 +165,12 @@ export async function relay(deps: RelayDeps, r: RelayRequest): Promise<void> {
     return;
   }
   const requestClass = requestClassOf(r.headers);
+  const launchId = r.headers["x-jev-router-launch-id"];
   const decided = await deps.service.decide({
     harness,
     sessionKey,
     policyId: route.policy,
+    ...(launchId && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(launchId) ? { launchId } : {}),
     body: normalized,
     ...(requestClass ? { requestClass } : {}),
     ...(r.headers["x-claude-code-context-compacted"] ? { contextCompacted: true } : {}),
