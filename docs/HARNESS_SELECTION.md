@@ -125,3 +125,4 @@ node scripts/enable-harness-selection.cjs        # ~/.jev-router/orca-launch/lau
 - 品質不足は自動判定しません。PM/確認者が `quality_insufficient` を記録したときだけGoが解禁されます。
 - 対話（TUI）の形では標準エラーを奪わないため、失敗の分類ができません。分類できない失敗は再試行せず停止します。
 - 対象環境（デスクトップ・deep-dev2・deep-dev）ごとに、認証とprovider設定はその機械のままです。
+- 非対話の子プロセスの標準入力は閉じます（`stdio:['ignore','pipe','pipe']`）。`opencode run` は標準入力のEOFを待つため、サーバーでstdinが開いたパイプのままだと無出力で止まります。
