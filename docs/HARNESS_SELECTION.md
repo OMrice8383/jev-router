@@ -71,6 +71,7 @@ node scripts/enable-harness-selection.cjs        # ~/.jev-router/orca-launch/lau
 ```
 
 - `JEV_ROUTER_HOME` を読むので、対象の機械でそのまま実行します。既存ファイルは `launch.cjs.bak-harness-<日時>` に控えます。
+- `--modes build` を無条件に足している機械では、先に `node scripts/guard-pi-modes-flag.cjs` を実行します。PM受付のPi起動は `--no-extensions` を付けるため、そのままだと `Unknown option: --modes` で即終了します。
 - runtimeの `dist` は**消さずに重ねて**配置します。稼働中のPi/Claude・relayを止めたり再起動したりしません。次の起動から有効です。
 - 「機構が有効」と「OpenCodeが実際に選べる」は別です。`harness-status.json` に確認済みの記録が無い機械では、常に既存のPi/Claudeが選ばれます。
 
