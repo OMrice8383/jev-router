@@ -2,6 +2,31 @@ export type { CatalogEntry, DefaultCandidate, EgressName, KeyDetection } from ".
 export { buildDefaultPolicy, DEFAULT_CANDIDATES, DEFAULT_RULES, detectKeys, EGRESS_DEFAULTS, parseOpenRouterCatalog } from "./defaults";
 export type { InitOptions, InitResult } from "./init";
 export { describeDetection, initPolicy } from "./init";
+export type {
+  ExistingHarness,
+  HarnessCandidateId,
+  HarnessFailureKind,
+  HarnessLaunch,
+  HarnessSelection,
+  HarnessStatus,
+  HarnessStatusEntry,
+  LaunchRecord,
+  QuotaObservation,
+  SelectionInput,
+} from "./harness";
+export {
+  classifyHarnessFailure,
+  HARNESS_CANDIDATES,
+  HEALTH_MAX_AGE_MS,
+  harnessStatusPath,
+  parseHarnessStatus,
+  QUOTA_MAX_AGE_MS,
+  readHarnessStatus,
+  resolveHarnessLaunch,
+  selectHarness,
+  stripModelFlags,
+  writeHarnessStatus,
+} from "./harness";
 export type { JudgeFactoryOptions } from "./judge-factory";
 export { createJudge } from "./judge-factory";
 export { prepareLaunchAudit, recordLaunchSelection } from "./launch-audit";
