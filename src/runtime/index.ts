@@ -4,6 +4,7 @@ export type { InitOptions, InitResult } from "./init";
 export { describeDetection, initPolicy } from "./init";
 export type { JudgeFactoryOptions } from "./judge-factory";
 export { createJudge } from "./judge-factory";
+export { prepareLaunchAudit, recordLaunchSelection } from "./launch-audit";
 export { JsonlLogger } from "./log";
 export type { OllamaDetection } from "./ollama";
 export { chooseOllamaModel, detectOllama } from "./ollama";

@@ -30,6 +30,7 @@ export interface DecideInput {
   readonly harness: Harness;
   readonly sessionKey: string;
   readonly policyId: string;
+  readonly launchId?: string;
   readonly body: NormalizedBody;
   readonly requestClass?: RequestClass;
   readonly contextCompacted?: boolean;
@@ -168,6 +169,7 @@ export class RouterService {
         }
         const record = buildDecisionRecord({
           id: this.deps.randomId(),
+          ...(input.launchId ? { launchId: input.launchId } : {}),
           ts: this.deps.now(),
           request,
           session,

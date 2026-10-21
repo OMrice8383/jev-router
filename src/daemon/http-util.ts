@@ -31,6 +31,7 @@ const REQUEST_DROP: ReadonlySet<string> = new Set([
   "authorization",
   "x-api-key",
   "x-goog-api-key",
+  "x-jev-router-launch-id",
 ]);
 const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(["authorization", "x-api-key", "x-goog-api-key"]);
 const RESPONSE_DROP: ReadonlySet<string> = new Set([...HOP_BY_HOP, "content-length", "content-encoding"]);

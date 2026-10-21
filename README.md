@@ -1,4 +1,6 @@
 > **Downstream fork (not the upstream npm release).** Compatibility repairs and verification limits: [DOWNSTREAM_SETUP](docs/DOWNSTREAM_SETUP.md). No existing agent settings are changed by cloning or building.
+>
+> 起動ごとの実モデル選択記録・確認・戻し方: [LAUNCH_AUDIT](docs/LAUNCH_AUDIT.md)。
 
 # jev-router
 

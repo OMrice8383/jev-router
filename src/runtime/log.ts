@@ -1,5 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import type { DecisionRecord } from "../core/record";
+import { recordLaunchSelection } from "./launch-audit";
 
 const REPORT_EVERY = 50;
 
@@ -21,7 +23,19 @@ export class JsonlLogger {
 
   write(record: unknown): void {
     const line = `${JSON.stringify(record)}\n`;
-    this.chain = this.chain.then(() => this.append(line)).catch((e: unknown) => this.report(e));
+    this.chain = this.chain
+      .then(async () => {
+        await this.append(line);
+        if (record && typeof record === "object" && "launchId" in record) {
+          try {
+            await recordLaunchSelection(record as DecisionRecord);
+          } catch {
+            // Audit failures must neither hide the decision log nor leak metadata/credentials.
+            console.error("jev-router: launch selection audit write failed");
+          }
+        }
+      })
+      .catch((e: unknown) => this.report(e));
   }
 
   flush(): Promise<void> {
