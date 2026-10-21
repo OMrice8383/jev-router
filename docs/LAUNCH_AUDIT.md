@@ -14,7 +14,7 @@ node scripts/enable-launch-audit.cjs
 
 `scripts/recent-launch-selections.cjs` を `~/.jev-router/orca-launch/` に置くと、各機械・作業場所の最新の実選択を1行ずつ表示できます。
 
-実装担当の起動では、同じ `launches.jsonl` に `event:"harness"`（選んだハーネス・候補・実モデル・理由・残枠・フォールバック）と `event:"harness_outcome"`（OpenCodeの終了コード）も増えます。詳しくは [HARNESS_SELECTION](HARNESS_SELECTION.md)。```sh
+実装担当の起動では、同じ `launches.jsonl` に `event:"harness"`（選んだハーネス・候補・**予定**モデル `plannedModel`・理由・残枠・フォールバック）、`event:"harness_launch"`（起動できたか `launchOk`・終了コード・失敗の種類）、`event:"harness_handoff"`（変更が残ったため再実行しなかった）も増えます。実際に適用されたモデルはこの経路では観測しないため `appliedModel` は常に `null` です。詳しくは [HARNESS_SELECTION](HARNESS_SELECTION.md)。```sh
 node "$HOME/.jev-router/orca-launch/recent-launch-selections.cjs"
 ```
 
