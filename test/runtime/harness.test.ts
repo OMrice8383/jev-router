@@ -14,6 +14,7 @@ import {
   resolveHarnessLaunch,
   selectHarness,
   stripModelFlags,
+  workerArgs,
   writeHarnessStatus,
 } from "../../src/runtime/harness";
 
@@ -147,7 +148,7 @@ test("the launch plan sets the selected model through OpenCode's own config and 
   expect(plan.kind).toBe("opencode");
   if (plan.kind !== "opencode") return;
   expect(plan.executable).toBe("/usr/bin/opencode");
-  expect(plan.args).toEqual(["some/dir"]);
+  expect(plan.args).toEqual(["--agent", "build", "--auto", "some/dir"]);
   expect(JSON.parse(plan.env.OPENCODE_CONFIG_CONTENT as string)).toEqual({
     theme: "dark",
     model: HARNESS_CANDIDATES["opencode-free"].model,
@@ -166,6 +167,12 @@ test("without a verified candidate the launch falls back to the unchanged Pi rou
   expect(plan.harness).toBe("pi");
   expect(plan.record.fallback).toBe(true);
   expect(plan.record.appliedModel).toBeNull();
+});
+
+test("a worker launch never stalls on permissions and never re-pins a model", () => {
+  expect(workerArgs(["--model=x/y", "-m", "a/b", "--thinking"])).toEqual(["--agent", "build", "--auto"]);
+  expect(workerArgs(["--agent", "plan", "--auto", "dir"])).toEqual(["--agent", "plan", "--auto", "dir"]);
+  expect(workerArgs(["--agent=build", "--auto=always"])).toEqual(["--agent=build", "--auto=always"]);
 });
 
 test("caller flags that would pin a model or effort never reach the child", () => {

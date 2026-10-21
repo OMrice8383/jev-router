@@ -14,6 +14,7 @@ node <home>/.jev-router/orca-launch/launch.cjs implementation [-- CLIの引数]
 - `implementation` という**明示的な第1引数**が唯一の境界です。`pi` / `claude` の既存の呼び方は今までどおりで、ハーネス選択は働きません。
 - 既存経路へ戻すときの行き先は環境変数 `JEV_HARNESS_FALLBACK=pi|claude`（既定 `pi`）。
 - 呼び出し側は `--model` / `-m` / `--thinking` を付けません。付いていても子プロセスへは渡しません（モデルは選択結果だけが決めます）。
+- OpenCodeへは `--agent build --auto` を付けて起動します（担当②の実測どおり）。作業者が権限確認で止まらないためで、呼び出し側が `--agent` / `--auto` を指定していればそれを尊重します。`permission:` は書かず、既存の `permissions` 設定をそのまま使います。
 - 起動確認だけなら `JEV_ORCA_PROBE=1` を付けると、選択結果のJSONを出して推論を始めません。
 
 ## 判定（`src/runtime/harness.ts`）

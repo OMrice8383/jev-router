@@ -288,6 +288,18 @@ export function stripModelFlags(args: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * A delegated worker must not stall on a permission prompt; Pi already starts with `--approve`.
+ * `--agent build` keeps the role OpenCode uses by default, so a stale config cannot switch it.
+ */
+export function workerArgs(args: readonly string[]): string[] {
+  const out = stripModelFlags(args);
+  const has = (flag: string) => out.some((a) => a === flag || a.startsWith(`${flag}=`));
+  if (!has("--auto")) out.unshift("--auto");
+  if (!has("--agent")) out.unshift("--agent", "build");
+  return out;
+}
+
 /** Keep every existing OpenCode setting and change only the model this boundary selected. */
 export function opencodeOverlay(model: string, existing?: string): string {
   let base: Record<string, unknown> = {};
@@ -377,7 +389,7 @@ export async function resolveHarnessLaunch(input: LaunchInput): Promise<HarnessL
   return {
     kind: "opencode",
     executable: opencodeExecutable(env),
-    args: stripModelFlags(input.args),
+    args: workerArgs(input.args),
     env: childEnv,
     record: {
       role: "implementation",
