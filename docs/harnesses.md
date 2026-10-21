@@ -98,21 +98,23 @@ requires_openai_auth = true
 
 ## OpenCode
 
+OpenCode v2 (2.1.x) reads `providers.<id>.settings`; the credential stays in OpenCode's own store (`opencode auth login <integration>`), so no key is written into the config:
+
 ```json
 {
-  "provider": {
-    "jev-router": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "jev-router",
-      "options": { "baseURL": "http://127.0.0.1:4141/v1", "apiKey": "jev-router" },
+  "model": "opencode-go/auto",
+  "providers": {
+    "opencode-go": {
+      "settings": { "baseURL": "http://127.0.0.1:4141/v1" },
       "models": { "auto": { "name": "jev-router auto", "limit": { "context": 200000, "output": 65536 } } }
     }
-  },
-  "model": "jev-router/auto"
+  }
 }
 ```
 
-`setup` also drops a plugin into `~/.config/opencode/plugins/jev-router.js` that tags requests with the session id and reports tool results, compaction, and API errors. The relay applies reasoning effort for the chat dialect, so the plugin does not need to.
+OpenCode v1 used a different shape (`provider.<id>.options.baseURL` with `apiKey`); v2 ignores it.
+
+`setup` also drops a plugin into `~/.config/opencode/plugins/jev-router.js` that tags requests with the session id and reports tool results, compaction, and API errors. That plugin is written against the v1 plugin API, and v2 refuses it (`Plugin must export a default definition with an id and an effect or setup function`), so on 2.1.x remove it: routing, session tagging (OpenCode's own `x-opencode-session` header) and reasoning effort for the chat dialect all work without it. A port to the v2 plugin API is pending.
 
 ## Gemini CLI
 
