@@ -60,6 +60,8 @@ export async function recordLaunchSelection(record: DecisionRecord, home = confi
     effort: attempt?.effort ?? (served === record.decision.candidate ? (record.decision.effort ?? null) : null),
     candidates: context.candidates.map((c: { id: string; model: string }) => ({ id: c.id, model: c.model })),
     policyHash: context.policyHash,
+    ...(record.loadedPolicyHash ? { loadedPolicyHash: record.loadedPolicyHash, routingRevision: record.routingRevision } : {}),
+    ...(record.task ? { task: record.task } : {}),
     source: record.decision.source,
     reasons: record.decision.reasons,
   };

@@ -364,7 +364,7 @@ describe("daemon endpoints", () => {
     expect((await fetch(`${daemon.url}/healthz`)).status).toBe(200);
   });
 
-  test("/observe compaction escalates the next relay request and /decide answers plugins", async () => {
+  test("/observe compaction rejudges the next relay request and /decide answers plugins", async () => {
     reset();
     await fetch(`${daemon.url}/observe`, {
       method: "POST",
@@ -377,7 +377,8 @@ describe("daemon endpoints", () => {
       body: JSON.stringify(anthropicBody()),
     });
     await res.text();
-    expect(records[0]!.decision.source).toBe("override");
+    expect(records[0]!.decision.source).toBe("judge");
+    expect(records[0]!.contextCompacted).toBe(true);
 
     const decide = await fetch(`${daemon.url}/decide`, {
       method: "POST",

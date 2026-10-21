@@ -110,6 +110,7 @@ export class RouterService {
       ...(input.requestClass ? { requestClass: input.requestClass } : {}),
       isNewUserTurn: b.isNewUserTurn,
       ...(b.lastUserText !== undefined ? { lastUserText: b.lastUserText } : {}),
+      ...(b.taskText !== undefined ? { taskText: b.taskText } : {}),
       ...(b.assistantIntentTail !== undefined ? { assistantIntentTail: b.assistantIntentTail } : {}),
       toolNames: b.toolNames,
       hasImages: b.hasImages,

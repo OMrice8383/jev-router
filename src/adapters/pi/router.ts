@@ -12,6 +12,7 @@ import {
   type SessionState,
   type ToolOutcome,
 } from "../../core/types";
+import { headAndTail, isContinuation } from "../../core/work";
 import type { Judge } from "../../judge/types";
 
 export interface PiModelRef {
@@ -46,7 +47,7 @@ export interface PiRouterDeps<TModel extends PiModelRef = PiModelRef> {
 
 const DEFAULT_PI_PROVIDER: Readonly<Record<string, string>> = { openrouter: "openrouter", vercel: "vercel-ai-gateway" };
 const EXCERPT_TAIL = 200;
-const INTENT_TAIL = 400;
+const INTENT_TAIL = 2000;
 const CHARS_PER_TOKEN = 4;
 
 const tail = (s: string, n: number): string => (s.length > n ? s.slice(-n) : s);
@@ -65,6 +66,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
   private ownSwitch = false;
   private pendingCompaction = false;
   private intentTail: string | undefined;
+  private taskText: string | undefined;
   private lastTokens: number | undefined;
   private lastDecision: Decision | undefined;
   private lastApplyError: string | undefined;
@@ -79,14 +81,15 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     return this.enabled && !this.paused;
   }
 
-  onSessionStart(_reason: string): void {
+  onSessionStart(_reason: string, taskText?: string, intent?: string): void {
     this.flushRecord();
     this.session = emptySession();
     this.syncCurrent();
     this.sessionKey = this.deps.randomId();
     this.paused = false;
     this.pendingCompaction = false;
-    this.intentTail = undefined;
+    this.intentTail = intent ? headAndTail(intent, INTENT_TAIL) : undefined;
+    this.taskText = taskText ? headAndTail(taskText, 4000) : undefined;
     this.lastTokens = undefined;
     this.lastDecision = undefined;
     this.lastApplyError = undefined;
@@ -97,6 +100,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
   onBeforeAgentStart(event: { readonly prompt: string; readonly images?: readonly unknown[] }): Promise<void> {
     this.hasImages ||= (event.images?.length ?? 0) > 0;
     if (!this.isActive) return Promise.resolve();
+    if (!isContinuation(event.prompt)) this.taskText = headAndTail(event.prompt, 4000);
     const request = this.request({
       isNewUserTurn: true,
       lastUserText: event.prompt,
@@ -113,7 +117,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
     readonly usage?: LastUsage;
     readonly hasImages?: boolean;
   }): Promise<void> {
-    if (event.assistantText) this.intentTail = tail(event.assistantText, INTENT_TAIL);
+    if (event.assistantText) this.intentTail = headAndTail(event.assistantText, INTENT_TAIL);
     this.hasImages ||= event.hasImages === true;
     return this.enqueue(async () => {
       const served = event.model ?? this.deps.currentModel();
@@ -196,6 +200,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
       ...(effort ? { requestedEffort: effort } : {}),
       isNewUserTurn: part.isNewUserTurn,
       ...(part.lastUserText !== undefined ? { lastUserText: part.lastUserText } : {}),
+      ...(this.taskText ? { taskText: this.taskText } : {}),
       ...(this.intentTail ? { assistantIntentTail: this.intentTail } : {}),
       toolNames: this.deps.getActiveTools(),
       hasImages: part.hasImages,
@@ -245,7 +250,11 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
       }
     }
     const current = this.session.current;
-    if (["fallback", "lease", "hold"].includes(concluded.decision.source) && current?.candidate === concluded.decision.candidate) {
+    if (
+      !concluded.decision.reasons.some((r) => r.startsWith("task_boundary:")) &&
+      ["fallback", "lease", "hold"].includes(concluded.decision.source) &&
+      current?.candidate === concluded.decision.candidate
+    ) {
       // A fallback and its healthy continuation preserve actual effort, including off and levels outside this policy.
       const { effort: _proposed, ...decision } = concluded.decision;
       concluded = {
@@ -291,7 +300,7 @@ export class PiRouter<TModel extends PiModelRef = PiModelRef> {
 
   private async apply(decision: Decision): Promise<ApplyOutcome> {
     const ref = this.resolve(decision.candidate);
-    if (decision.source === "fallback") {
+    if (decision.source === "fallback" && !decision.reasons.some((r) => r.startsWith("task_boundary:"))) {
       return this.session.current?.candidate === decision.candidate && sameModel(this.deps.currentModel(), ref)
         ? { ok: true }
         : { ok: false, error: "judge fallback not applied; current model and thinking unchanged" };

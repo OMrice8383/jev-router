@@ -1,4 +1,5 @@
 import type { NormalizedRequest } from "./types";
+import { headAndTail, type WorkContext } from "./work";
 
 /** Hard caps on what leaves the process toward the judge. */
 export const DOSSIER_LIMITS = {
@@ -20,6 +21,7 @@ export interface DossierTool {
 export interface Dossier {
   readonly harness: string;
   readonly task: string;
+  readonly work?: WorkContext;
   readonly intent?: string;
   readonly tools: readonly string[];
   readonly recent_tools: readonly DossierTool[];
@@ -35,7 +37,14 @@ const head = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s
 const tail = (s: string, n: number): string => (s.length > n ? s.slice(-n) : s);
 
 export function buildDossier(req: NormalizedRequest, opts: DossierOptions = {}): Dossier {
-  const redact = opts.redact ?? ((s: string) => s);
+  const redact =
+    opts.redact ??
+    ((s: string) =>
+      s
+        .replace(/\bBearer\s+[^\s"']+/gi, "Bearer [redacted]")
+        .replace(/\b(?:sk-|sb_secret_|gh[pousr]_)[A-Za-z0-9_-]{12,}/g, "[redacted]")
+        .replace(/((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,"'}]+/gi, "$1[redacted]")
+        .replace(/https?:\/\/(?:1drv\.ms|onedrive\.live\.com)\/[^\s"']+/gi, "[private-share-url]"));
   const ordered = [...req.toolOutcomes].reverse().sort((a, b) => Number(b.isError) - Number(a.isError));
   const recent = ordered.slice(0, DOSSIER_LIMITS.maxToolEntries).map((o): DossierTool => {
     const text = o.errorText ?? o.excerpt;
@@ -44,7 +53,19 @@ export function buildDossier(req: NormalizedRequest, opts: DossierOptions = {}):
   const intent = req.assistantIntentTail ? redact(tail(req.assistantIntentTail, DOSSIER_LIMITS.intentChars)) : undefined;
   let dossier: Dossier = {
     harness: req.harness,
-    task: redact(head(req.lastUserText ?? "", DOSSIER_LIMITS.taskChars)),
+    task: redact(headAndTail(req.lastUserText ?? "", DOSSIER_LIMITS.taskChars)),
+    ...(req.work
+      ? {
+          work: {
+            ...req.work,
+            goal: headAndTail(redact(req.work.goal), 600),
+            nextAction: headAndTail(redact(req.work.nextAction), 400),
+            completion: headAndTail(redact(req.work.completion), 400),
+            targets: headAndTail(redact(req.work.targets), 400),
+            ...(req.work.failure ? { failure: { ...req.work.failure, reason: headAndTail(redact(req.work.failure.reason), 200) } } : {}),
+          },
+        }
+      : {}),
     ...(intent ? { intent } : {}),
     tools: req.toolNames.slice(0, DOSSIER_LIMITS.maxTools).map((n) => redact(head(n, DOSSIER_LIMITS.toolNameChars))),
     recent_tools: recent,

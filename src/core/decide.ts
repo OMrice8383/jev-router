@@ -1,13 +1,14 @@
 import type { Answer, JudgeRequest } from "../judge/types";
 import { estimateSwitch } from "./cache";
 import { counterfactualCosts } from "./cost";
-import { buildDossier, type DossierOptions } from "./dossier";
+import { buildDossier, type Dossier, type DossierOptions } from "./dossier";
 import { effortStepUp, higherEffort, resolveEffort } from "./effort";
 import { getPolicyDef } from "./policy";
 import type { ExprContext, ExprValue } from "./policy/expr";
 import type { Candidate, EgressInput, Policy, PolicyDef, RuleAction } from "./policy/types";
 import { executionPhaseQuestions, taskPhaseQuestions } from "./questions";
 import { advanceSession } from "./session";
+import { isInfrastructureFailure, taskFailures } from "./signals/failure";
 import { type StageScore, scoreStage } from "./signals/stage";
 import type {
   CurrentAssignment,
@@ -20,6 +21,7 @@ import type {
   SwitchCostEstimate,
   WireDialect,
 } from "./types";
+import { updateWorkContext } from "./work";
 
 /** Consecutive all-failure tool batches that force an escalation. */
 const FAILURE_OVERRIDE_THRESHOLD = 3;
@@ -39,7 +41,11 @@ export interface Concluded {
 
 export type PlanOutcome =
   | { readonly kind: "decision"; readonly decision: Decision; readonly session: SessionState }
-  | { readonly kind: "judge"; readonly judgeRequest: JudgeRequest; conclude(answers: Readonly<Record<string, Answer>> | null): Concluded };
+  | {
+      readonly kind: "judge";
+      readonly judgeRequest: JudgeRequest & { readonly state: Dossier };
+      conclude(answers: Readonly<Record<string, Answer>> | null): Concluded;
+    };
 
 interface Tiers {
   readonly ids: readonly string[];
@@ -142,7 +148,7 @@ function flattenAnswers(answers: Readonly<Record<string, Answer>>): ExprContext 
  * Minimum confidence across the choice and score answers that the policy's rules actually reference.
  * Questions no rule reads cannot gate the decision. A missing or non-finite confidence counts as zero.
  */
-function minConfidence(answers: Readonly<Record<string, Answer>>, def: PolicyDef): number {
+function minConfidence(answers: Readonly<Record<string, Answer>>, def: Pick<PolicyDef, "rules">): number {
   const referenced = new Set<string>();
   for (const rule of def.rules) for (const id of rule.expr.identifiers) referenced.add(id.replace(/\.confidence$/, ""));
   let min = 1;
@@ -192,9 +198,16 @@ const isPureCap = (a: RuleAction): boolean => a.at_most !== undefined && Object.
  * otherwise a judge request plus a `conclude` continuation. Pure: no I/O, no clock, no randomness.
  */
 export function plan(input: PlanInput): PlanOutcome {
-  const { request, session, policy, policyId } = input;
+  const { policy, policyId } = input;
+  const { work, boundary: detectedBoundary } = updateWorkContext(input.session.work, input.request);
+  const taskScoped = input.request.harness === "pi" || input.request.harness === "claude-code";
+  const boundary = taskScoped ? detectedBoundary : undefined;
+  const request = { ...input.request, work };
+  const { holdUntilTurn: _oldHold, ...withoutHold } = input.session;
+  const session: SessionState = boundary ? { ...withoutHold, ledger: [], consecutiveFailures: 0 } : input.session;
+  const needsTaskJudgment = request.isNewUserTurn || boundary !== undefined || request.contextCompacted === true;
   const def: PolicyDef = getPolicyDef(policy, policyId);
-  const baseReasons: string[] = [];
+  const baseReasons: string[] = boundary ? [`task_boundary:${boundary}`] : [];
 
   const speaking = def.order.filter((id) => speaks(policy, policy.candidates[id] as Candidate, request));
   if (speaking.length < def.order.length) baseReasons.push("dialect_filter");
@@ -206,15 +219,21 @@ export function plan(input: PlanInput): PlanOutcome {
 
   const current: CurrentAssignment | undefined =
     session.current && tiers.ids.includes(session.current.candidate) ? session.current : undefined;
-  const baseline = current?.candidate ?? tiers.clamp(def.default);
+  const baseline = boundary ? tiers.clamp(def.default) : (current?.candidate ?? tiers.clamp(def.default));
 
   const stage = scoreStage([...session.ledger, request.toolOutcomes], request.harness, {
     recentTurnWindow: def.recent_turn_window,
     toolSemantics: def.tool_semantics,
   });
-  const batch = request.toolOutcomes;
+  const batch = taskFailures(request.toolOutcomes);
   const failuresNow =
-    batch.length === 0 ? session.consecutiveFailures : batch.every((o) => o.isError) ? session.consecutiveFailures + 1 : 0;
+    batch.length === 0
+      ? request.toolOutcomes.length > 0
+        ? 0
+        : session.consecutiveFailures
+      : batch.every((o) => o.isError)
+        ? session.consecutiveFailures + 1
+        : 0;
   const holdActive = session.holdUntilTurn !== undefined && session.turn < session.holdUntilTurn;
   const ctx = baseContext(request, stage, failuresNow);
 
@@ -250,9 +269,11 @@ export function plan(input: PlanInput): PlanOutcome {
 
   const finish = (wantedId: string, source: DecisionSource, o: FinishOptions): Concluded => {
     // Caps come last and bound every path, overrides and holds included: never above the cap this turn.
+    // A known security/payment/migration design or review must not lose capability on an uncertain judge answer.
+    const protectedId = taskScoped && work.criticalDesign ? tiers.higher(wantedId, tiers.ids[tiers.ids.length - 1] as string) : wantedId;
     const capped = capFor(def, tiers, o.capContext ?? ctx);
-    const lowered = capped !== undefined && tiers.idx(wantedId) > tiers.idx(capped.cap);
-    const candidateId = lowered ? capped.cap : wantedId;
+    const lowered = capped !== undefined && tiers.idx(protectedId) > tiers.idx(capped.cap);
+    const candidateId = lowered ? capped.cap : protectedId;
     const capReasons = lowered ? [...capped.reasons.filter((r) => !o.reasons.includes(r)), "capped"] : [];
     const candidate = policy.candidates[candidateId] as Candidate;
     const { effort, clamped } = resolveEffort(candidate, o.effortWanted);
@@ -264,14 +285,20 @@ export function plan(input: PlanInput): PlanOutcome {
       ...(effort ? { effort } : {}),
       source,
       ...(o.confidence !== undefined ? { confidence: o.confidence } : {}),
-      reasons: [...baseReasons, ...o.reasons, ...capReasons, ...(clamped ? ["effort_clamped"] : [])],
+      reasons: [
+        ...baseReasons,
+        ...o.reasons,
+        ...(protectedId !== wantedId ? ["critical_design"] : []),
+        ...capReasons,
+        ...(clamped ? ["effort_clamped"] : []),
+      ],
       counterfactuals: counterfactualCosts(policy.candidates, def.order, request.estimatedInputTokens, def.est_output_tokens),
       lease: o.lease,
       ...(cache ? { cache } : {}),
       ...(capped ? { ceiling: capped.cap } : {}),
     };
     const assignment: CurrentAssignment =
-      o.keepCurrent && current && !lowered
+      o.keepCurrent && current && !lowered && candidateId === current.candidate
         ? current
         : { candidate: candidateId, ...(effort ? { effort } : {}), lease: o.lease, sinceTurn: session.turn };
     return {
@@ -284,14 +311,17 @@ export function plan(input: PlanInput): PlanOutcome {
     ...finish(candidateId, source, o),
   });
 
-  // 1. Hard overrides always escalate one tier and start a hold.
-  const overrideReason = request.contextCompacted
-    ? "context_compacted"
-    : failuresNow >= FAILURE_OVERRIDE_THRESHOLD
-      ? "repeated_failures"
-      : stage.critical
-        ? "critical_error"
-        : undefined;
+  // Operational failures retain the choice; changing the model cannot repair a missing service or credential.
+  if (!needsTaskJudgment && current && request.toolOutcomes.length > 0 && request.toolOutcomes.every(isInfrastructureFailure)) {
+    return decide(current.candidate, "hold", {
+      reasons: ["infrastructure_failure"],
+      lease: current.lease,
+      keepCurrent: true,
+      ...(current.effort ? { effortWanted: current.effort } : {}),
+    });
+  }
+  // 1. Escalate only after repeated task failures, not merely compaction or an exception marker.
+  const overrideReason = failuresNow >= FAILURE_OVERRIDE_THRESHOLD ? "repeated_failures" : undefined;
   if (overrideReason) {
     return decide(tiers.up(baseline), "override", {
       reasons: [overrideReason],
@@ -302,7 +332,7 @@ export function plan(input: PlanInput): PlanOutcome {
   }
 
   // 2. An active hold keeps tool continuations where they are.
-  if (holdActive && !request.isNewUserTurn && current) {
+  if (holdActive && !needsTaskJudgment && current) {
     return decide(current.candidate, "hold", {
       reasons: ["hold_active"],
       lease: current.lease,
@@ -313,7 +343,7 @@ export function plan(input: PlanInput): PlanOutcome {
 
   // 3. A clean tool continuation inside a lease reuses the decision.
   const batchHasError = batch.some((o) => o.isError);
-  if (!request.isNewUserTurn && current && current.lease !== "one_call" && !batchHasError) {
+  if (!needsTaskJudgment && current && current.lease !== "one_call" && !batchHasError) {
     return decide(current.candidate, "lease", {
       reasons: ["lease_active"],
       lease: current.lease,
@@ -337,17 +367,23 @@ export function plan(input: PlanInput): PlanOutcome {
   }
 
   // 5. Decisive tool signals on continuations skip the judge.
-  if (!request.isNewUserTurn && !stage.abstained && stage.direction !== "none" && stage.confidence >= def.confidence_threshold) {
+  if (!needsTaskJudgment && !stage.abstained && stage.direction !== "none" && stage.confidence >= def.confidence_threshold) {
     const wanted = current?.effort ?? request.requestedEffort;
     const effortOpt = wanted ? { effortWanted: wanted } : {};
-    if (stage.direction === "capable") {
+    const taskErrorCount = [...session.ledger, batch]
+      .map(taskFailures)
+      .filter((b) => b.length > 0)
+      .slice(-def.recent_turn_window)
+      .flat()
+      .filter((o) => o.isError).length;
+    if (stage.direction === "capable" && (!taskScoped || taskErrorCount >= 2)) {
       const up = tiers.up(baseline);
       const stepped = effortFirst(up);
       if (stepped)
         return decide(baseline, "signals", { reasons: ["signals_capable", "effort_first"], lease: "one_call", effortWanted: stepped });
       return decide(up, "signals", { reasons: ["signals_capable"], lease: "one_call", ...effortOpt });
     }
-    if (!holdActive) {
+    if (stage.direction === "efficient" && !holdActive) {
       const down = tiers.down(baseline);
       const blocked = cacheBlock(down);
       if (blocked && current)
@@ -363,15 +399,17 @@ export function plan(input: PlanInput): PlanOutcome {
   }
 
   // 6. Ask the judge: task questions on a user turn, execution questions on an ambiguous continuation.
-  const useExecution = !request.isNewUserTurn && !stage.abstained;
-  const judgeRequest: JudgeRequest = {
+  const useExecution = !needsTaskJudgment && !stage.abstained;
+  const judgeRequest: JudgeRequest & { readonly state: Dossier } = {
     state: buildDossier(request, input.dossier ?? {}),
     questions: useExecution ? executionPhaseQuestions() : taskPhaseQuestions(),
     sessionId: request.sessionKey,
   };
 
   const conclude = (answers: Readonly<Record<string, Answer>> | null): Concluded => {
-    const fallbackEffort = current?.effort ?? request.requestedEffort;
+    const fallbackEffort = boundary
+      ? (policy.candidates[def.default]?.default_effort ?? "medium")
+      : (current?.effort ?? request.requestedEffort);
     const fallbackOpt = fallbackEffort ? { effortWanted: fallbackEffort } : {};
     if (!answers || Object.keys(answers).length === 0) {
       const why = answers ? "judge_empty" : "judge_unavailable";
@@ -387,7 +425,13 @@ export function plan(input: PlanInput): PlanOutcome {
 
     const full: ExprContext = { ...ctx, ...flattenAnswers(answers) };
     const confidence = minConfidence(answers, def);
-    if (confidence < def.min_confidence) {
+    const trustedModelRule = def.rules.some(
+      (rule) =>
+        (rule.then.pin || rule.then.at_least || rule.then.up) &&
+        rule.expr.evaluate(full) &&
+        minConfidence(answers, { rules: [rule] }) >= def.min_confidence,
+    );
+    if (confidence < def.min_confidence && !trustedModelRule) {
       return finish(baseline, "judge", { reasons: ["low_confidence"], lease: "tool_chain", confidence, capContext: full, ...fallbackOpt });
     }
 
@@ -398,9 +442,13 @@ export function plan(input: PlanInput): PlanOutcome {
     let holdTurns: number | undefined;
     let pinned = false;
     const reasons: string[] = [];
+    const appliedConfidence: number[] = [];
     for (const [i, rule] of def.rules.entries()) {
       const a = rule.then;
       if (isPureCap(a) || !rule.expr.evaluate(full)) continue;
+      const ruleConfidence = minConfidence(answers, { rules: [rule] });
+      if (ruleConfidence < def.min_confidence) continue;
+      if (a.pin || a.at_least || a.up) appliedConfidence.push(ruleConfidence);
       reasons.push(`rule:${i}`);
       if (a.effort) effortWanted = a.effort;
       if (a.hold_turns !== undefined) holdTurns = a.hold_turns;
@@ -416,7 +464,7 @@ export function plan(input: PlanInput): PlanOutcome {
     // Only an `up` action may be absorbed by effort-first; a pin, an at_least, or the default above the baseline switches.
     const forced = target;
     if (upSteps > 0) target = tiers.higher(target, tiers.up(baseline, upSteps));
-    if (tiers.idx(target) < tiers.idx(baseline) && !request.isNewUserTurn && !allowDown) {
+    if (tiers.idx(target) < tiers.idx(baseline) && !needsTaskJudgment && !allowDown) {
       target = baseline;
       reasons.push("downgrade_blocked");
     }
@@ -440,8 +488,8 @@ export function plan(input: PlanInput): PlanOutcome {
     return finish(target, "judge", {
       reasons,
       capContext: full,
-      lease: "tool_chain",
-      confidence,
+      lease: blocked ? "one_call" : "tool_chain",
+      confidence: appliedConfidence.length > 0 ? Math.min(...appliedConfidence) : confidence,
       ...(finalEffort ? { effortWanted: finalEffort } : {}),
       ...(holdTurns !== undefined ? { hold: session.turn + 1 + holdTurns } : {}),
       ...(blocked ? { cache: blocked } : {}),

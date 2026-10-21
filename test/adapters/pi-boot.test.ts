@@ -55,7 +55,7 @@ for (const mode of ["file", "process", "empty", "invalid"] as const) {
         };
         await handlers.get("session_start")({ reason: "startup" }, ctx);
         assert(!statuses.includes("off"), warnings.join("; "));
-        await handlers.get("before_agent_start")({ prompt: "refactor", images: [] }, ctx);
+        await handlers.get("before_agent_start")({ prompt: ${JSON.stringify(mode === "invalid" ? "continue existing work" : "refactor")}, images: [] }, ctx);
         assert.equal(fetches, 1);
         await handlers.get("turn_end")({ message: {
           role: "assistant", provider: current.provider, model: current.id,

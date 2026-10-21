@@ -1,3 +1,5 @@
+import type { WorkContext } from "./work";
+
 /** Reasoning effort vocabulary shared across harnesses. Ordered from least to most. */
 export type Effort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export const EFFORT_ORDER: readonly Effort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
@@ -30,6 +32,8 @@ export interface ToolOutcome {
   /** Short tail of the tool output, already bounded by the adapter. */
   readonly excerpt?: string;
   readonly durationMs?: number;
+  /** Content-free failure classification retained by replay. */
+  readonly failureKind?: "infrastructure" | "task";
 }
 
 /** Provider-neutral view of one model request, produced by an adapter or the relay. */
@@ -41,6 +45,9 @@ export interface NormalizedRequest {
   /** True when the latest message is a user prompt rather than tool results. */
   readonly isNewUserTurn: boolean;
   readonly lastUserText?: string;
+  /** Latest non-continuation task already present in harness history (bounded before judging). */
+  readonly taskText?: string;
+  readonly work?: WorkContext;
   readonly assistantIntentTail?: string;
   /** Tool names declared on the request. */
   readonly toolNames: readonly string[];
@@ -77,6 +84,7 @@ export interface SessionState {
   readonly turn: number;
   /** Per-turn tool outcome batches, oldest first, bounded by the session helper. */
   readonly ledger: readonly (readonly ToolOutcome[])[];
+  readonly work?: WorkContext;
   readonly current?: CurrentAssignment;
   /** While `turn < holdUntilTurn`, de-escalation is blocked. */
   readonly holdUntilTurn?: number;

@@ -1,6 +1,6 @@
 {
   "name": "@french-castle/jev-router",
-  "version": "0.3.0-nagakura.3",
+  "version": "0.3.0-nagakura.4",
   "description": "Route each coding-agent turn to the cheapest model that can finish it. Switchyard-style execution signals, TypeSafe\u0027s jev as the judge, and honest cost accounting. Works with Claude Code, Codex, OpenCode, and Pi.",
   "keywords": [
     "llm",
@@ -83,7 +83,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",
-    "check": "bun run typecheck \u0026\u0026 bun run lint \u0026\u0026 bun test \u0026\u0026 bun run build \u0026\u0026 node scripts/cancel-smoke.mjs",
+    "check": "bun run typecheck \u0026\u0026 bun run lint \u0026\u0026 bun test \u0026\u0026 bun run build \u0026\u0026 node scripts/cancel-smoke.mjs \u0026\u0026 node scripts/graceful-smoke.mjs",
     "prepublishOnly": "bun run check \u0026\u0026 bun run build"
   },
   "pi": {

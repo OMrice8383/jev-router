@@ -1,4 +1,5 @@
 import type { Answer } from "../judge/types";
+import { isInfrastructureFailure } from "./signals/failure";
 import type { StageScore } from "./signals/stage";
 import type { Decision, Effort, Harness, NormalizedRequest, PlanUtilization, RequestClass, SessionState } from "./types";
 
@@ -17,6 +18,9 @@ export interface DecisionRecord {
   readonly id: string;
   /** Local launch correlation only; never forwarded to an upstream. */
   readonly launchId?: string;
+  readonly loadedPolicyHash?: string;
+  readonly routingRevision?: string;
+  readonly task?: { readonly id?: string; readonly phase: string; readonly failureKind?: "infrastructure" | "task" };
   readonly ts: number;
   readonly session: string;
   readonly harness: Harness;
@@ -30,7 +34,7 @@ export interface DecisionRecord {
   /** Tool names declared on the request, bounded. Names, never arguments. */
   readonly toolNames?: readonly string[];
   /** Outcomes carried by the request as name and error flag only, so a replay can rebuild the signals. */
-  readonly toolOutcomes?: readonly { readonly name: string; readonly isError: boolean }[];
+  readonly toolOutcomes?: readonly { readonly name: string; readonly isError: boolean; readonly failureKind?: "infrastructure" | "task" }[];
   readonly signals?: StageScore["dimensions"] & { readonly score: number };
   readonly judge?: JudgeTrace;
   readonly decision: Decision;
@@ -107,12 +111,27 @@ export function buildDecisionRecord(input: RecordInput): DecisionRecord {
     ...(request.requestClass ? { requestClass: request.requestClass } : {}),
     isNewUserTurn: request.isNewUserTurn,
     estimatedInputTokens: request.estimatedInputTokens,
+    ...(input.session.work
+      ? {
+          task: {
+            ...(input.session.work.id ? { id: input.session.work.id } : {}),
+            phase: input.session.work.phase,
+            ...(input.session.work.failure ? { failureKind: input.session.work.failure.kind } : {}),
+          },
+        }
+      : {}),
     ...(request.contextCompacted ? { contextCompacted: true } : {}),
     ...(request.hasImages ? { hasImages: true } : {}),
     ...(request.requestedEffort ? { requestedEffort: request.requestedEffort } : {}),
     ...(request.toolNames.length > 0 ? { toolNames: request.toolNames.slice(0, 64) } : {}),
     ...(request.toolOutcomes.length > 0
-      ? { toolOutcomes: request.toolOutcomes.slice(0, 64).map((o) => ({ name: o.name, isError: o.isError })) }
+      ? {
+          toolOutcomes: request.toolOutcomes.slice(0, 64).map((o) => ({
+            name: o.name,
+            isError: o.isError,
+            ...(isInfrastructureFailure(o) ? { failureKind: "infrastructure" as const } : {}),
+          })),
+        }
       : {}),
     ...(stage && !stage.abstained ? { signals: { ...stage.dimensions, score: stage.raw } } : {}),
     ...(input.judge ? { judge: input.judge } : {}),
