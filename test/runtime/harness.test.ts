@@ -17,7 +17,6 @@ import {
   opencodeOverlay,
   parseHarnessStatus,
   QUALITY_MAX_AGE_MS,
-  QUOTA_MAX_AGE_MS,
   readHarnessStatus,
   recordHarnessFailure,
   resolveHarnessLaunch,
