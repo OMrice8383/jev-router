@@ -1,5 +1,5 @@
 ﻿# デスクトップの3択小窓：Jev に渡す候補集合を切り替えるだけ。
-# ④の単一 mode CLI を呼ぶのが唯一の外部操作。モデル固定・残枠表示・設定は持たない。
+# harness-mode.cjs を呼ぶのが唯一の外部操作。モデル固定・残枠表示・設定は持たない。
 # -Mock では CLI を呼ばず、指定ファイルに呼び出しを記録する（局所検証用。実行では使わない）。
 param(
     [switch]$Mock,
@@ -9,14 +9,35 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# 選択肢。ラベルは依頼どおり厳守。右側の値は④の mode 契約で置き換える場所（今は仮のenum）。
+# 共有 mode 契約の固定3値。
 $script:ModeMap = [ordered]@{
     'OpenCode Freeあり' = 'free-with-go'
     'OpenCode Go枠'     = 'go-only'
     'OpenCodeなし'      = 'none'
 }
 
-# ---- ④の単一 mode CLI との境（統合時はこの2つの関数だけを直す。契約を別に作らない） ----
+$script:Helper = Join-Path $PSScriptRoot 'harness-mode.cjs'
+$script:LastReadback = $null
+function Invoke-ModeCli([string]$Action, [string]$Value) {
+    $arguments = @($script:Helper, $Action)
+    if ($Value) { $arguments += $Value }
+    $raw = & node @arguments
+    $code = $LASTEXITCODE
+    $script:LastReadback = ($raw -join "`n") | ConvertFrom-Json
+    if ($script:LastReadback.logPath) { $script:logNote = "記録：$($script:LastReadback.logPath)" }
+    if ($code -ne 0 -or -not $script:LastReadback.ok) {
+        throw '一部または全部の操作が失敗しました。各台の結果を確認してください。'
+    }
+}
+function ReadbackText {
+    if (-not $script:LastReadback.machines) { return '結果を取得できませんでした（変更状態は不明）' }
+    return (($script:LastReadback.machines | ForEach-Object {
+        $state = if ($_.ok) { ModeLabel $_.mode } elseif ($_.changed -eq $true) { '保存済・再読失敗' } elseif ($null -eq $_.changed) { '通信失敗・変更不明' } else { '失敗' }
+        '{0}={1}' -f $_.host, $state
+    }) -join ' / ')
+}
+
+# ---- 単一 mode CLI との境 ----
 function Get-CurrentModeValue {
     if ($Mock) {
         # mock：最後の set 記録か、起動時の指定値。
@@ -26,7 +47,9 @@ function Get-CurrentModeValue {
         }
         return $MockCurrent
     }
-    # 未統合：契約を受け取るまで「不明」を返す（推測の値を出さない）。
+    Invoke-ModeCli 'get' ''
+    $modes = @($script:LastReadback.machines | ForEach-Object { $_.mode } | Select-Object -Unique)
+    if ($modes.Count -eq 1) { return $modes[0] }
     return $null
 }
 function Set-ModeValue([string]$Value) {
@@ -37,8 +60,8 @@ function Set-ModeValue([string]$Value) {
         }
         return $true
     }
-    # 未統合：契約がないので決して成功とは言わない。
-    throw 'mode CLI の契約が未統合です（親から契約を受けたらここだけを直す）'
+    Invoke-ModeCli 'set' $Value
+    return $true
 }
 function ModeLabel([string]$Value) {
     foreach ($entry in $script:ModeMap.GetEnumerator()) {
@@ -75,22 +98,22 @@ if ($SelfTest) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$current = Get-CurrentModeValue
+try { $current = Get-CurrentModeValue } catch { $current = $null }
 $currentLabel = ModeLabel $current
-$headline = if ($currentLabel) { '現在：{0}' -f $currentLabel } else { '現在：不明（まだ記録がありません）' }
+$headline = if ($currentLabel) { '現在：{0}' -f $currentLabel } else { '現在：{0}' -f (ReadbackText) }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Jev 候補集合の切り替え'
-$form.Size = [System.Drawing.Size]::new(420, 240)
+$form.Size = [System.Drawing.Size]::new(620, 310)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
-$form.AcceptButton = $button   # Enter でも切り替えを実行できる（Tab・矢印キーで選択）
+# AcceptButton は button 作成後に設定する。
 
 $label = New-Object System.Windows.Forms.Label
 $label.Text = $headline
 $label.Location = [System.Drawing.Point]::new(14, 12)
-$label.Size = [System.Drawing.Size]::new(380, 22)
+$label.Size = [System.Drawing.Size]::new(580, 22)
 $form.Controls.Add($label)
 
 $radioControls = @{}
@@ -113,13 +136,15 @@ $button.Text = '切り替える'
 $button.Location = [System.Drawing.Point]::new(18, $top + 8)
 $button.Size = [System.Drawing.Size]::new(120, 30)
 $form.Controls.Add($button)
+$form.AcceptButton = $button
 
 $result = New-Object System.Windows.Forms.Label
 $result.Location = [System.Drawing.Point]::new(14, $top + 46)
-$result.Size = [System.Drawing.Size]::new(384, 40)
+$result.Size = [System.Drawing.Size]::new(580, 64)
 $form.Controls.Add($result)
 
-$logNote = '（記録の場所：Jev の launcher ログ）'
+if (-not $script:logNote) { $script:logNote = '記録：未取得' }
+$result.Text = $script:logNote
 
 $button.Add_Click({
         $selected = $script:radioControls.GetEnumerator() | Where-Object { $_.Value.Checked } | Select-Object -First 1
@@ -133,14 +158,15 @@ $button.Add_Click({
             if ($ok) {
                 # 現在の1行も新しい選択へ更新する（失敗時は書き換えない）。
                 $script:label.Text = '現在：{0}' -f $labelText
-                $script:result.Text = '切り替えました：{0}{1}' -f $labelText, $script:logNote
+                $script:result.Text = "適用・再読完了：{0}`n{1}" -f $labelText, $script:logNote
             } else {
-                $script:result.Text = '失敗：変更していません。'
+                $script:result.Text = "失敗（変更済みの台がある場合があります）`n{0}`n{1}" -f (ReadbackText), $script:logNote
             }
         }
         catch {
-            # 失敗を成功のようには見せない。現在値の表示も書き換えない。
-            $script:result.Text = '失敗：変更していません。理由の記録：{0}' -f $script:logNote
+            # 部分成功を隠さず、機械別 readback を出す。
+            $script:label.Text = '現在：{0}' -f (ReadbackText)
+            $script:result.Text = "失敗（変更状態は上記の各台結果を参照）`n{0}" -f $script:logNote
         }
     })
 
