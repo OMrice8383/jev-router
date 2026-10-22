@@ -6,7 +6,14 @@ import { pathToFileURL } from "node:url";
 import { HARNESS_CANDIDATES } from "../../src/runtime/harness";
 
 // Exercise the generated launcher without starting any CLI, relay or inference.
-test("generated launcher snapshots mode and reaches Pi after four distinct capacity failures", async () => {
+test.each([
+  ["429 quota exhausted", false],
+  ["401 unauthorized", false],
+  ["ECONNRESET", false],
+  ["opaque 400", false],
+  ["no_output", false],
+  ["opaque 400", true],
+] as const)("generated launcher: %s dirty=%s keeps boundary snapshot and hands off safely", async (failure, dirty) => {
   const home = await mkdtemp(join(tmpdir(), "jev-launcher-"));
   const root = join(home, "orca-launch");
   const runtime = join(root, "runtime");
@@ -31,13 +38,13 @@ test("generated launcher snapshots mode and reaches Pi after four distinct capac
 const fs=require('node:fs'),path=require('node:path'),{EventEmitter}=require('node:events');
 const env={...process.env},runtime=${JSON.stringify(runtime)},args=['-p','fix parser'];
 const events=[],seen=[];const log=e=>events.push(e);
-const spawnSync=()=>({stdout:''});
+const spawnSync=()=>({stdout:${JSON.stringify(dirty ? " M file.ts" : "")}});
 const spawn=(exe,argv,options)=>{
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
  seen.push(options.env.JEV_ROUTER_HARNESS||'pi');
  // A user switch during an active boundary must affect only the next boundary.
  fs.writeFileSync(${JSON.stringify(modePath)},JSON.stringify({version:1,mode:'none',at:${JSON.stringify(at)}}));
- setImmediate(()=>{if(options.env.JEV_ROUTER_HARNESS){child.stderr.emit('data',Buffer.from('429 quota exhausted'));child.emit('exit',1)}else{child.emit('exit',0)}});
+ setImmediate(()=>{if(options.env.JEV_ROUTER_HARNESS){if(${JSON.stringify(failure)}!=='no_output')child.stderr.emit('data',Buffer.from(${JSON.stringify(failure)}));child.emit('exit',${failure === "no_output" ? 0 : 1})}else{child.emit('exit',0)}});
  return child;
 };
 (async()=>{
@@ -54,11 +61,16 @@ const spawn=(exe,argv,options)=>{
   expect(patched.stderr.toString()).toBe("");
   expect(patched.exitCode).toBe(0);
   const run = Bun.spawnSync([process.execPath, launcher], { env: { ...process.env, JEV_ROUTER_HOME: home }, stdin: "ignore" });
-  if (run.exitCode !== 0) throw new Error(run.stderr.toString());
-  expect(run.exitCode).toBe(0);
+  expect(run.exitCode).toBe(dirty ? 1 : 0);
   const result = JSON.parse(run.stdout.toString().trim());
-  expect(result.seen).toEqual([...Object.keys(HARNESS_CANDIDATES), "pi"]);
-  expect(result.events.filter((e: { event: string }) => e.event === "harness_launch")).toHaveLength(5);
+  const expected = dirty
+    ? ["opencode-free"]
+    : failure.startsWith("429")
+      ? [...Object.keys(HARNESS_CANDIDATES), "pi"]
+      : ["opencode-free", "pi"];
+  expect(result.seen).toEqual(expected);
+  expect(result.events.filter((e: { event: string }) => e.event === "harness_launch")).toHaveLength(expected.length);
   const saved = JSON.parse(await readFile(join(root, "harness-status.json"), "utf8"));
   expect(saved.candidates["opencode-go-glm"].model).toBe(HARNESS_CANDIDATES["opencode-go-glm"].model);
+  if (!failure.startsWith("429")) expect(saved.candidates["opencode-free"].ok).toBe(true);
 });

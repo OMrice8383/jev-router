@@ -93,10 +93,9 @@ test("an unverified candidate is never selected, and the existing route keeps wo
   expect(selection.rejected.map((r) => r.candidate)).toEqual(["opencode-free", "opencode-free-glm", "opencode-go", "opencode-go-glm"]);
 });
 
-test("a stale health record is unknown again, and a future one is never fresh", () => {
+test("verified healthy records remain eligible, while future records are never fresh", () => {
   const stale = pick(status(healthy(HEALTH_MAX_AGE_MS + 60_000), goReady()));
-  expect(stale.kind).toBe("existing");
-  if (stale.kind === "existing") expect(stale.reasons).toContain("free_health_stale");
+  expect(stale.kind).toBe("opencode");
 
   // Parsed from a file, a future timestamp is unreadable rather than freshly healthy.
   expect(parseHarnessStatus({ candidates: { "opencode-free": { at: future(), ok: true } } }, now).candidates).toEqual({});
@@ -482,11 +481,15 @@ test("a capacity loss is retried once only in the non-interactive shape and only
   expect(retryDecision("congestion", "run", false)).toBe("retry");
   expect(retryDecision("quota", "run", true)).toBe("handoff");
   expect(retryDecision("quota", "tui", false)).toBe("stop");
-  expect(retryDecision("auth", "run", false)).toBe("stop");
-  expect(retryDecision("network", "run", false)).toBe("stop");
-  expect(retryDecision(null, "run", false)).toBe("stop");
-  // A silent success is not a capacity signal, so it neither retries nor sidesteps the model.
-  expect(retryDecision("no_output", "run", false)).toBe("stop");
+  expect(retryDecision("auth", "run", false)).toBe("fallback");
+  expect(retryDecision("network", "run", false)).toBe("fallback");
+  expect(retryDecision(null, "run", false)).toBe("fallback");
+  // No observed capacity failure is fabricated; a silent result goes straight to Pi.
+  expect(retryDecision("no_output", "run", false)).toBe("fallback");
+  for (const kind of ["auth", "network", "no_output", null] as const) {
+    expect(retryDecision(kind, "run", true)).toBe("handoff");
+    expect(retryDecision(kind, "tui", false)).toBe("stop");
+  }
 });
 
 test("the launch work hint reuses the existing context: design and labelled hard work are not cheap-model work", () => {
@@ -549,6 +552,23 @@ test("Go failure preserves verification and retries only on a later boundary", a
   for (const model of ["opencode/glm-5.3-flash", "opencode-go/unknown"]) {
     const status = statusOf({ [candidate]: { ...goGlmReady(), model } });
     expect(selectHarness({ ...input, status }).kind).toBe("existing");
+  }
+});
+
+test("Free capacity failures recover after the existing time window, not permanently", () => {
+  for (const failure of ["quota", "congestion"] as const) {
+    const s = status({ at: at(), ok: false, failure, model: HARNESS_CANDIDATES["opencode-free"].model }, goReady());
+    expect(pick(s)).toMatchObject({ kind: "opencode", candidate: "opencode-go" });
+    expect(selectHarness({ role: "implementation", fallback: "pi", status: s, now: now + HEALTH_MAX_AGE_MS })).toMatchObject({
+      kind: "opencode",
+      candidate: "opencode-free",
+    });
+  }
+  const oldGo = status(failed("quota"), { ...goReady(), at: at(HEALTH_MAX_AGE_MS * 2) });
+  expect(pick(oldGo)).toMatchObject({ kind: "opencode", candidate: "opencode-go" });
+  for (const failure of ["auth", "quality_insufficient"] as const) {
+    const s = status({ at: at(HEALTH_MAX_AGE_MS * 2), ok: false, failure }, undefined);
+    expect(pick(s).kind).toBe("existing");
   }
 });
 

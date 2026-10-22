@@ -113,7 +113,7 @@ export const GO_MODEL_ALLOWLIST: readonly string[] = CANDIDATE_ORDER.filter((id)
   (id) => HARNESS_CANDIDATES[id].family,
 );
 
-/** A healthy probe older than this is treated as unknown, not as still healthy. */
+/** Free capacity failures may be tried again after this existing observation window. */
 export const HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /**
  * Nagakura 2026-10-22: "残枠は気にしないで使って、使えなかったらPiに行くでいい".
@@ -417,15 +417,18 @@ function healthVerdict(entry: HarnessStatusEntry | undefined, now: number, retry
   const at = Date.parse(entry.at);
   if (!Number.isFinite(at)) return { eligible: false, reason: "unverified" };
   if (at - now > CLOCK_SKEW_MS) return { eligible: false, reason: "health_future" };
-  // Go capacity is tested again on a new boundary; the launch-local exclusion prevents loops.
-  if (!entry.ok && retryCapacity && (entry.failure === "quota" || entry.failure === "congestion")) return { eligible: true };
+  // Go recovers on the next boundary; Free recovers after the existing capacity window.
+  // Launch-local exclusions prevent either from looping within the same request.
+  if (!entry.ok && (retryCapacity || now - at > HEALTH_MAX_AGE_MS) && (entry.failure === "quota" || entry.failure === "congestion")) {
+    return { eligible: true };
+  }
   if (!entry.ok) {
     return {
       eligible: false,
       reason: entry.failure === "quality_insufficient" ? "quality_insufficient" : `${entry.failure ?? "unverified"}_failure`,
     };
   }
-  if (now - at > HEALTH_MAX_AGE_MS) return { eligible: false, reason: "health_stale" };
+  // Verified access does not expire just because no separate probe collector refreshed it.
   return { eligible: true };
 }
 
@@ -472,7 +475,7 @@ const REASON_TAG: Readonly<Record<HarnessCandidateId, string>> = {
 /**
  * Group 1 (free) in order, then group 2 (Go) when a free candidate lost capacity, then the existing
  * Pi/Claude route. Each candidate is judged on its own record, so an exhausted free model does not
- * disable the other free model and a stale Go record does not authorise spending.
+ * disable the other free model and an unverified Go model never authorises spending.
  *
  * Auth or network failures are not capacity, and work the existing judgement calls hard never
  * touches either group: it goes straight to Pi.
@@ -681,17 +684,17 @@ export function implementationCall(args: readonly string[], stdinPrompt?: string
  * candidate, but only in the non-interactive shape and only when the workspace is clean: two
  * harnesses must never edit the same working tree. Anything else stops and hands over.
  *
- * `no_output` (a zero exit with nothing printed) is deliberately not retried: it is not a capacity
- * signal, and writing it into the status file would sideline a healthy model for a day.
+ * Non-capacity failures (including silent output) go directly to Pi on a clean run, without
+ * trying another OpenCode candidate or fabricating an observation in the status file.
  */
 export function retryDecision(
   kind: HarnessFailureKind | "no_output" | null,
   shape: "tui" | "run",
   workspaceDirty: boolean,
-): "retry" | "handoff" | "stop" {
-  if (kind !== "quota" && kind !== "congestion") return "stop";
+): "retry" | "fallback" | "handoff" | "stop" {
   if (shape !== "run") return "stop";
-  return workspaceDirty ? "handoff" : "retry";
+  if (workspaceDirty) return "handoff";
+  return kind === "quota" || kind === "congestion" ? "retry" : "fallback";
 }
 
 /** Keep every existing OpenCode setting and change only the model this boundary selected. */
