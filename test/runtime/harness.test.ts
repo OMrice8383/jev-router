@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,12 +9,15 @@ import {
   GO_MODEL_ALLOWLIST,
   HARNESS_CANDIDATES,
   type HarnessCandidateId,
+  type HarnessMode,
   type HarnessStatus,
   type HarnessStatusEntry,
   HEALTH_MAX_AGE_MS,
+  harnessModePath,
   implementationCall,
   launchWork,
   opencodeOverlay,
+  parseHarnessMode,
   parseHarnessStatus,
   QUALITY_MAX_AGE_MS,
   readHarnessStatus,
@@ -90,10 +93,9 @@ test("an unverified candidate is never selected, and the existing route keeps wo
   expect(selection.rejected.map((r) => r.candidate)).toEqual(["opencode-free", "opencode-free-glm", "opencode-go", "opencode-go-glm"]);
 });
 
-test("a stale health record is unknown again, and a future one is never fresh", () => {
+test("verified healthy records remain eligible, while future records are never fresh", () => {
   const stale = pick(status(healthy(HEALTH_MAX_AGE_MS + 60_000), goReady()));
-  expect(stale.kind).toBe("existing");
-  if (stale.kind === "existing") expect(stale.reasons).toContain("free_health_stale");
+  expect(stale.kind).toBe("opencode");
 
   // Parsed from a file, a future timestamp is unreadable rather than freshly healthy.
   expect(parseHarnessStatus({ candidates: { "opencode-free": { at: future(), ok: true } } }, now).candidates).toEqual({});
@@ -116,11 +118,10 @@ test("a stale health record is unknown again, and a future one is never fresh", 
     },
   };
   const quotaSelection = selectHarness({ role: "implementation", fallback: "pi", status: quotaAhead, now });
-  expect(quotaSelection.kind).toBe("existing");
-  if (quotaSelection.kind === "existing") expect(quotaSelection.reasons).toContain("go_quota_future");
+  expect(quotaSelection.kind).toBe("opencode");
 });
 
-test("a Go record never blocks the walk on a missing number; a flagged exhausted one does", () => {
+test("Go quota numbers never gate a verified candidate", () => {
   // The quota number is advisory. Missing, unreadable or old: Go still runs, Pi still catches it.
   for (const go of [{ ...healthy(), model: HARNESS_CANDIDATES["opencode-go"].model }, goReady()] as HarnessStatusEntry[]) {
     const selection = pick(status({ at: at(), ok: false, failure: "quota" }, go));
@@ -129,11 +130,17 @@ test("a Go record never blocks the walk on a missing number; a flagged exhausted
     // The number stays visible to the operator without gating the launch.
     if (go.quota) expect(selection.kind === "opencode").toBe(true);
   }
-  const exhausted = pick(status({ at: at(), ok: false, failure: "quota" }, { ...healthy(), model: HARNESS_CANDIDATES["opencode-go"].model, quota: quota(0) }));
-  expect(exhausted.kind).toBe("existing");
-  if (exhausted.kind === "existing") expect(exhausted.reasons).toContain("go_quota_exhausted");
+  const exhausted = pick(
+    status({ at: at(), ok: false, failure: "quota" }, { ...healthy(), model: HARNESS_CANDIDATES["opencode-go"].model, quota: quota(0) }),
+  );
+  expect(exhausted.kind).toBe("opencode");
   // A flagged number keeps its advisory meaning; only a real 429 falls back (next test).
-  const empty = pick(status({ at: at(), ok: false, failure: "quota" }, { ...healthy(), model: HARNESS_CANDIDATES["opencode-go"].model, quota: { remaining: Number.NaN, checkedAt: at(), source: "x" } }));
+  const empty = pick(
+    status(
+      { at: at(), ok: false, failure: "quota" },
+      { ...healthy(), model: HARNESS_CANDIDATES["opencode-go"].model, quota: { remaining: Number.NaN, checkedAt: at(), source: "x" } },
+    ),
+  );
   expect(empty.kind).toBe("opencode");
 });
 
@@ -241,6 +248,7 @@ test("a free allowance lost mid-run hands the same request to Pi while the paid 
   // which is what the launcher passes to Pi as an argument.
   const plan = await resolveHarnessLaunch({
     env: {},
+    mode: "free-with-go",
     args: ["-p", "--no-session"],
     stdinPrompt: "fix the median case in calc.js",
     status: afterLimit,
@@ -391,6 +399,7 @@ test("an observed launch failure is written once and never overwrites fresher ev
 test("the launch plan names the planned model and does not claim an applied one", async () => {
   const plan = await resolveHarnessLaunch({
     env: { OPENCODE_BIN: "/usr/bin/opencode", OPENCODE_CONFIG_CONTENT: JSON.stringify({ theme: "dark" }) },
+    mode: "free-with-go",
     args: ["--model", "opencode-go/glm-5.3-flash", "--thinking", "some/dir"],
     status: status(healthy(), goReady()),
     now,
@@ -415,7 +424,7 @@ test("the launch plan names the planned model and does not claim an applied one"
 });
 
 test("without a verified candidate the launch falls back to the unchanged Pi route", async () => {
-  const plan = await resolveHarnessLaunch({ env: {}, args: [], status: status(undefined, undefined), now });
+  const plan = await resolveHarnessLaunch({ env: {}, mode: "free-with-go", args: [], status: status(undefined, undefined), now });
   expect(plan.kind).toBe("existing");
   if (plan.kind !== "existing") return;
   expect(plan.harness).toBe("pi");
@@ -436,6 +445,7 @@ test("the non-interactive PM shape becomes opencode run and names what it droppe
 
   const plan = await resolveHarnessLaunch({
     env: { OPENCODE_BIN: "/usr/bin/opencode" },
+    mode: "free-with-go",
     args: ["-p", "--no-session"],
     stdinPrompt: "fix the median case",
     status: status(healthy(), goReady()),
@@ -471,11 +481,15 @@ test("a capacity loss is retried once only in the non-interactive shape and only
   expect(retryDecision("congestion", "run", false)).toBe("retry");
   expect(retryDecision("quota", "run", true)).toBe("handoff");
   expect(retryDecision("quota", "tui", false)).toBe("stop");
-  expect(retryDecision("auth", "run", false)).toBe("stop");
-  expect(retryDecision("network", "run", false)).toBe("stop");
-  expect(retryDecision(null, "run", false)).toBe("stop");
-  // A silent success is not a capacity signal, so it neither retries nor sidesteps the model.
-  expect(retryDecision("no_output", "run", false)).toBe("stop");
+  expect(retryDecision("auth", "run", false)).toBe("fallback");
+  expect(retryDecision("network", "run", false)).toBe("fallback");
+  expect(retryDecision(null, "run", false)).toBe("fallback");
+  // No observed capacity failure is fabricated; a silent result goes straight to Pi.
+  expect(retryDecision("no_output", "run", false)).toBe("fallback");
+  for (const kind of ["auth", "network", "no_output", null] as const) {
+    expect(retryDecision(kind, "run", true)).toBe("handoff");
+    expect(retryDecision(kind, "tui", false)).toBe("stop");
+  }
 });
 
 test("the launch work hint reuses the existing context: design and labelled hard work are not cheap-model work", () => {
@@ -486,6 +500,76 @@ test("the launch work hint reuses the existing context: design and labelled hard
     scope: "APP-G1-T02",
   });
   expect(launchWork("Task: APP-G1-T02\nGoal: implement the parser", "{ not json")).toMatchObject({ hard: false, scope: "APP-G1-T02" });
+});
+
+test("mode is read at each boundary and status writes leave it unchanged", async () => {
+  const home = await mkdtemp(join(tmpdir(), "jev-mode-"));
+  const env = { JEV_ROUTER_HOME: home };
+  const path = harnessModePath(env);
+  await mkdir(join(home, "orca-launch"), { recursive: true });
+  const candidates = statusOf({ "opencode-free": healthy(), "opencode-go-glm": goGlmReady(0) });
+  for (const [mode, candidate] of [
+    ["free-with-go", "opencode-free"],
+    ["go-only", "opencode-go-glm"],
+    ["none", null],
+  ] as const) {
+    const saved = JSON.stringify({ version: 1, mode, at: at() });
+    await writeFile(path, saved);
+    const plan = await resolveHarnessLaunch({ env, args: ["-p", "fix parser"], status: candidates, now });
+    expect(plan.record.candidate).toBe(candidate);
+    await recordHarnessFailure("opencode-go-glm", "quota", { env, at: new Date(now).toISOString() });
+    expect(await readFile(path, "utf8")).toBe(saved);
+    const hard = await resolveHarnessLaunch({
+      env,
+      args: [],
+      status: candidates,
+      now,
+      work: { hard: true, phase: "review", criticalDesign: true },
+    });
+    expect(hard.kind).toBe("existing");
+  }
+  for (const raw of [null, {}, "none", { mode: "other" }]) expect(parseHarnessMode(raw)).toBe("free-with-go");
+});
+
+test("Go failure preserves verification and retries only on a later boundary", async () => {
+  const home = await mkdtemp(join(tmpdir(), "jev-go-failure-"));
+  const env = { JEV_ROUTER_HOME: home };
+  const candidate = "opencode-go-glm";
+  await writeHarnessStatus(candidate, { ...goGlmReady(0), quality: [{ at: at(), scope: "OTHER-T1" }] }, env, now);
+  await recordHarnessFailure(candidate, "quota", { env, at: new Date(now).toISOString() });
+  const saved = await readHarnessStatus(env, now);
+  expect(saved.candidates[candidate]?.model).toBe(HARNESS_CANDIDATES[candidate].model);
+  expect(saved.candidates[candidate]?.quota?.remaining).toBe(0);
+  expect(saved.candidates[candidate]?.quality).toHaveLength(1);
+  const input = { role: "implementation", fallback: "pi", mode: "go-only", status: saved, now } as const;
+  expect(selectHarness({ ...input, exclude: [candidate] }).kind).toBe("existing");
+  expect(selectHarness(input)).toMatchObject({ kind: "opencode", candidate });
+  expect(selectHarness({ ...input, now: now + HEALTH_MAX_AGE_MS + 1000 })).toMatchObject({ kind: "opencode", candidate });
+  for (const mode of ["go-only", "free-with-go", "none"] as HarnessMode[]) {
+    expect(selectHarness({ ...input, mode, hard: true }).kind).toBe("existing");
+    expect(selectHarness({ ...input, mode, role: "pm" }).kind).toBe("existing");
+  }
+  for (const model of ["opencode/glm-5.3-flash", "opencode-go/unknown"]) {
+    const status = statusOf({ [candidate]: { ...goGlmReady(), model } });
+    expect(selectHarness({ ...input, status }).kind).toBe("existing");
+  }
+});
+
+test("Free capacity failures recover after the existing time window, not permanently", () => {
+  for (const failure of ["quota", "congestion"] as const) {
+    const s = status({ at: at(), ok: false, failure, model: HARNESS_CANDIDATES["opencode-free"].model }, goReady());
+    expect(pick(s)).toMatchObject({ kind: "opencode", candidate: "opencode-go" });
+    expect(selectHarness({ role: "implementation", fallback: "pi", status: s, now: now + HEALTH_MAX_AGE_MS })).toMatchObject({
+      kind: "opencode",
+      candidate: "opencode-free",
+    });
+  }
+  const oldGo = status(failed("quota"), { ...goReady(), at: at(HEALTH_MAX_AGE_MS * 2) });
+  expect(pick(oldGo)).toMatchObject({ kind: "opencode", candidate: "opencode-go" });
+  for (const failure of ["auth", "quality_insufficient"] as const) {
+    const s = status({ at: at(HEALTH_MAX_AGE_MS * 2), ok: false, failure }, undefined);
+    expect(pick(s).kind).toBe("existing");
+  }
 });
 
 test("clock skew is tolerated only within the documented window", () => {
