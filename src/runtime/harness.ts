@@ -212,6 +212,29 @@ export function harnessStatusPath(env: Env = process.env): string {
   return env.JEV_ROUTER_HARNESS_STATUS ?? join(configDir(env), "orca-launch", "harness-status.json");
 }
 
+/** User-owned candidate-set switch, separate from automatic health observations. */
+export type HarnessMode = "free-with-go" | "go-only" | "none";
+export const HARNESS_MODES: readonly HarnessMode[] = ["free-with-go", "go-only", "none"];
+const DEFAULT_MODE: HarnessMode = "free-with-go";
+
+export function harnessModePath(env: Env = process.env): string {
+  return env.JEV_ROUTER_HARNESS_MODE ?? join(configDir(env), "orca-launch", "harness-mode.json");
+}
+
+/** Anything unreadable or unknown stays on the default: the previous behaviour. */
+export function parseHarnessMode(raw: unknown): HarnessMode {
+  const mode = (raw as Record<string, unknown> | null)?.mode;
+  return HARNESS_MODES.includes(mode as HarnessMode) ? (mode as HarnessMode) : DEFAULT_MODE;
+}
+
+export async function readHarnessMode(env: Env = process.env): Promise<HarnessMode> {
+  try {
+    return parseHarnessMode(JSON.parse(await readFile(harnessModePath(env), "utf8")));
+  } catch {
+    return DEFAULT_MODE;
+  }
+}
+
 export async function readHarnessStatus(env: Env = process.env, now: number = Date.now()): Promise<HarnessStatus> {
   try {
     return parseHarnessStatus(JSON.parse(await readFile(harnessStatusPath(env), "utf8")), now);
@@ -256,6 +279,7 @@ export async function recordHarnessFailure(
   await writeHarnessStatus(
     candidate,
     {
+      ...current,
       at,
       ok: false,
       failure: kind,
@@ -359,6 +383,8 @@ export interface SelectionInput {
   readonly scope?: string;
   /** Candidates that already failed in this launch; never retried in the same run. */
   readonly exclude?: readonly HarnessCandidateId[];
+  /** Nagakura's three-way switch. Default is the previous behaviour. */
+  readonly mode?: HarnessMode;
 }
 
 export interface Rejection {
@@ -386,11 +412,13 @@ interface Verdict {
   readonly reason?: string;
 }
 
-function healthVerdict(entry: HarnessStatusEntry | undefined, now: number): Verdict {
+function healthVerdict(entry: HarnessStatusEntry | undefined, now: number, retryCapacity = false): Verdict {
   if (!entry) return { eligible: false, reason: "unverified" };
   const at = Date.parse(entry.at);
   if (!Number.isFinite(at)) return { eligible: false, reason: "unverified" };
   if (at - now > CLOCK_SKEW_MS) return { eligible: false, reason: "health_future" };
+  // Go capacity is tested again on a new boundary; the launch-local exclusion prevents loops.
+  if (!entry.ok && retryCapacity && (entry.failure === "quota" || entry.failure === "congestion")) return { eligible: true };
   if (!entry.ok) {
     return {
       eligible: false,
@@ -398,20 +426,6 @@ function healthVerdict(entry: HarnessStatusEntry | undefined, now: number): Verd
     };
   }
   if (now - at > HEALTH_MAX_AGE_MS) return { eligible: false, reason: "health_stale" };
-  return { eligible: true };
-}
-
-/**
- * Go runs without a numeric remainder: Nagakura 2026-10-22 ("残枠は気にしないで使って、使えなかったら
- * Piに行くでいい"). The recorded value is advisory — kept for the operator, never reconstructed or
- * doubled. A flagged number (0, a past window the owner marked exhausted) still stops the walk.
- */
-function quotaVerdict(entry: HarnessStatusEntry | undefined, now: number): Verdict {
-  const quota = entry?.quota;
-  if (!quota) return { eligible: true };
-  const checkedAt = Date.parse(quota.checkedAt);
-  if (Number.isFinite(checkedAt) && checkedAt - now > CLOCK_SKEW_MS) return { eligible: false, reason: "quota_future" };
-  if (!(quota.remaining > 0)) return { eligible: false, reason: "quota_exhausted" };
   return { eligible: true };
 }
 
@@ -473,22 +487,25 @@ export function selectHarness(input: SelectionInput): HarnessSelection {
   });
   if (input.role !== "implementation") return existing(["role_not_implementation"]);
 
+  const mode = input.mode ?? "free-with-go";
+  if (mode === "none") return existing(["role_explicit_implementation", "mode_none"]);
+
   const excluded = new Set(input.exclude ?? []);
   const verdicts = new Map<HarnessCandidateId, string | undefined>();
   for (const id of CANDIDATE_ORDER) {
     const entry = input.status.candidates[id];
     const candidate = HARNESS_CANDIDATES[id];
-    const health = healthVerdict(entry, now);
+    const health = healthVerdict(entry, now, candidate.group === 2);
     const model = modelVerdict(entry, id);
     const quality = qualityVerdict(entry, now, input.scope);
-    const quota = candidate.group === 2 ? quotaVerdict(entry, now) : { eligible: true };
+    const skipped = mode === "go-only" && candidate.group === 1 ? "mode_go_only" : undefined;
     verdicts.set(
       id,
       (excluded.has(id) ? "excluded_after_failure" : undefined) ??
+        skipped ??
         (!health.eligible ? (health.reason as string) : undefined) ??
         (!model.eligible ? (model.reason as string) : undefined) ??
-        (!quality.eligible ? (quality.reason as string) : undefined) ??
-        (!quota.eligible ? (quota.reason as string) : undefined),
+        (!quality.eligible ? (quality.reason as string) : undefined),
     );
   }
 
@@ -526,15 +543,16 @@ export function selectHarness(input: SelectionInput): HarnessSelection {
   const freePick = free.find((id) => reasonOf(id) === undefined);
   if (freePick) return chosen(freePick);
 
-  // Capacity is what unlocks the paid plan: a free model running out, throttling, congestion, or a
-  // recorded quality shortfall for this same work. Auth, network and an unverified record are not.
+  // Capacity is what unlocks the paid plan: a free model running out, throttling, congestion, a
+  // recorded quality shortfall for this same work, or the operator's own go-only switch.
   const freeShortfall = free.some((id) => {
     const reason = reasonOf(id);
     return (
       reason === "quota_failure" ||
       reason === "congestion_failure" ||
       reason === "quality_insufficient" ||
-      reason === "excluded_after_failure"
+      reason === "excluded_after_failure" ||
+      reason === "mode_go_only"
     );
   });
   if (freeShortfall) {
@@ -735,6 +753,8 @@ export interface LaunchInput {
   /** Work context the caller already knows; otherwise derived from the prompt. */
   readonly work?: LaunchWork;
   readonly stdinPrompt?: string;
+  /** Snapshot for retries within one boundary; otherwise read the user file now. */
+  readonly mode?: HarnessMode;
   readonly exclude?: readonly HarnessCandidateId[];
 }
 
@@ -761,6 +781,7 @@ export async function resolveHarnessLaunch(input: LaunchInput): Promise<HarnessL
     role: "implementation",
     fallback,
     status,
+    mode: input.mode ?? (await readHarnessMode(env)),
     now,
     hard: work.hard,
     ...(work.scope ? { scope: work.scope } : {}),
