@@ -3,19 +3,27 @@
 Jevはモデルと推論量だけでなく、**明示された実装担当の起動境界**で実行ハーネスも選びます。新しい管理システムや別の判断エンジンは作りません。既存の起動ラッパー（`orca-launch/launch.cjs`）、既存の難度・実影響の判断（`src/core/work.ts`）、既存のログを使い、選べる状態が確認できない候補は無効のまま既存のPi/Claude経路へ戻ります。
 
 - 対象: 実装・テスト修正の作業者起動だけ。
-- 対象外: PM、最終設計判断、重要な独立レビュー、作業途中の既存Pi/Claudeセッション、GLM・別モデル・有料Zen・従量課金API。役割名やプロンプトから推測しません。
+- 対象外: PM、最終設計判断、重要な独立レビュー、作業途中の既存Pi/Claudeセッション、別モデル・有料Zen・従量課金API。役割名やプロンプトから推測しません。
 
-## 優先順位（2026-10-22 長倉さん指示）
+## 優先順位（2026-10-22 長倉さん指示・4候補）
 
-1. `opencode/deepseek-v4.1-flash-free`（OpenCode無料枠）
-2. `opencode-go/deepseek-v4.1-flash`（OpenCode Go契約枠。**実ID・認証・残枠が確認できたときだけ**）
-3. Pi（既存経路。`JEV_HARNESS_FALLBACK=pi|claude` でClaudeも選べる）
+**第1群（無料枠）**
+1. `opencode/deepseek-v4.1-flash-free`（既存の基本。記録に `model` が無くても動く）
+2. `opencode/glm-5.3-flash-free`（**実ID・無料経路・実動作が未確認のあいだは無効**）
 
-- Freeが使える間はFree。
-- Freeの**枠切れ・429・混雑**、またはその作業について記録された品質不足のときだけGoへ。
-- Goが未確認・残枠不明/古い/不足ならPi。**古いGLMの記録をGoの許可として読まない。**
-- **難しい実装はFreeもGoも使わずPiへ直行。** 既存の作業文脈（`updateWorkContext`）の工程がdesign/review、認証・決済・移行を伴う設計、または既存policyの難度しきい値（`>= 2.6`）以上を「難しい」とします。健全という理由だけで難しい作業を安いモデルへ渡しません。
-- 認証エラー・通信障害はFreeの容量問題ではないのでGoを解禁しません（`go_withheld_operational`）。
+**第2群（OpenCode Go契約枠。実ID・契約経路・健全性・新鮮な残枠がそろったときだけ）**
+3. `opencode-go/deepseek-v4.1-flash`
+4. `opencode-go/glm-5.3-flash`
+
+**第3群**
+5. Pi（既存経路。`JEV_HARNESS_FALLBACK=pi|claude` でClaudeも選べる）
+
+- 同じ群の中は上の順。無料枠が残っている候補があれば、課金枠より先に必ずそれを使う。
+- 候補ごとに健全性・失敗・残枠・モデルを**独立**に持ちます。片方の無料候補が枠切れでも、もう片方は使えます。
+- 第2群へ移るのは第1群が**容量**で使えなくなったとき（枠切れ・429・混雑、またはその作業の品質不足）。認証・通信の失敗や未確認では移りません。
+- 未確認のモデルIDを推測で選びません。`model` が無い、または候補自身の許可リスト（`family`）に無い記録は、その候補の許可になりません。
+- **難しい実装は無料もGoも使わずPiへ直行。** 既存の作業文脈（`updateWorkContext`）の工程がdesign/review、認証・決済・移行を伴う設計、または既存policyの難度しきい値（`>= 2.6`）以上を「難しい」とします。健全という理由だけで難しい作業を安いモデルへ渡しません。
+- 認証エラー・通信障害は容量問題ではないのでGoを解禁しません（`go_withheld_operational`）。
 
 ## 呼び方（担当③＝PM側）
 
@@ -46,22 +54,26 @@ node <home>/.jev-router/orca-launch/launch.cjs implementation [-- 引数]
 
 ## 実行後の扱い
 
-- Freeが429・混雑で落ちた場合、**worktreeに変更が無く、非対話の形のときだけ**、同じプロセス内で1回だけ次候補（Go → Pi）へ切り替えます（`retryReason` を記録）。
+- 容量失敗（`quota` / `congestion`）で落ちた場合、**worktreeに変更が無く、非対話の形のときだけ**、同じプロセス内で次の候補へ切り替えます（`retryReason` を記録）。失敗した候補は `exclude` で外すので、第1群の別候補 → 第2群 → Pi の順に進みます。
+- **現在の起動スクリプト（`4` 担当）は再試行が1回だけです。** 4候補を通しで辿るには、除外を積みながら候補数まで再試行する形へ起動スクリプト側の追加が必要で、依頼中です。runtime側（`resolveHarnessLaunch` の `exclude` と `selectHarness`）は4候補の連続選択をすでに扱えます。
 - **変更が残っているときは再実行しません。** 変更とログをそのまま残し、`event:"harness_handoff"`（`handoff:"pi"`）を記録して非0で終わります。同じworktreeを2つのハーネスが並行編集しないためです。
 - 認証・通信の失敗では切り替えません（`stop`）。人が中身を見て判断します。
-- 起動直後の失敗を状態ファイルへ書き戻すのは、分類できた容量失敗（`quota` / `congestion`）だけです。新しい観測が既にあれば上書きしません。
+- 起動直後の失敗を状態ファイルへ書き戻すのは、分類できた容量失敗（`quota` / `congestion`）だけです。新しい観測が既にあれば上書きしません。無出力の成功（`no_output`）は容量ではないので書き戻さず、再試行もせず停止します。
 
 ## 判定（`src/runtime/harness.ts`）
 
 | 状態 | 選ぶもの | 理由の語 |
 |---|---|---|
-| Free が24時間以内に `ok` | `opencode/deepseek-v4.1-flash-free` | `free_verified` |
-| Free の枠切れ/混雑、または同じ作業の品質不足。かつGoの実ID・残枠が確認済み | `opencode-go/deepseek-v4.1-flash` | `free_quota_failure` / `free_congestion_failure` / `free_quality_insufficient`, `go_model_verified`, `go_quota_verified` |
+| 第1群の1番目（DeepSeek Free）が24時間以内に `ok` | `opencode/deepseek-v4.1-flash-free` | `free_verified` |
+| 1番目が使えず、2番目（GLM Free）が `ok` かつ自分の `family` の `model` を持つ | `opencode/glm-5.3-flash-free` | `free_verified` + `free_*`（1番目を外した理由） |
+| 第1群が容量で使えず、第2群の候補が健全・`model` 許可内・残枠が新しく足りる | 該当するGo候補 | `go_verified` + `free_quota_failure` など |
 | 難しい作業（工程 design/review・重大設計・難度しきい値以上） | 既存の Pi / Claude | `hard_work_pi` |
-| Free の認証/通信の失敗、未確認、古い、未来日時 | 既存の Pi / Claude | `free_auth_failure` など + `go_withheld_operational` |
-| Go の実IDが未確認・許可外、残枠が unknown・期限切れ・未来・0 | Goを選ばない | `go_model_unverified` / `go_model_not_allowed` / `go_quota_unknown` / `go_quota_stale` / `go_quota_future` / `go_quota_exhausted` |
+| 第1群が認証/通信で失敗、未確認、古い、未来日時 | 既存の Pi / Claude | `free_auth_failure` など + `go_withheld_operational` |
+| Go候補の実IDが未確認・許可外、残枠が unknown・期限切れ・未来・0 | そのGo候補を選ばない | `go_model_unverified` / `go_model_not_allowed` / `go_quota_unknown` / `go_quota_stale` / `go_quota_future` / `go_quota_exhausted`（GLM候補は `go_glm_*`） |
+| 容量は尽きたが第2群に確認済みの候補が無い | 既存の Pi / Claude | `go_none_verified` |
 
-- 失敗の種類は `auth`（401/403・provider.auth）、`quota`（429・残量不足）、`congestion`（503/529・混雑）、`network`（接続不能）、`quality_insufficient`（成果物の品質・速度不足）に分けます。
+- 理由の語は候補ごとに接頭辞が付きます。`free_`（DeepSeek Free）、`free_glm_`（GLM Free）、`go_`（Go DeepSeek）、`go_glm_`（Go GLM）。
+- 失敗の種類は `auth`（401/403・provider.auth）、`quota`（429・残量不足・無料枠の上限メッセージ）、`congestion`（503/529・混雑）、`network`（接続不能）、`quality_insufficient`（成果物の品質・速度不足）に分けます。`FreeUsageLimitError` / `provider.free-limit` / `Free usage limit reached` も `quota` として扱い、状態へ自動で書き戻します。
 - **未来の時刻は有効として扱いません。** 観測時刻・残枠の観測時刻とも、現在より5分（`CLOCK_SKEW_MS`）を超えて先なら「未確認」に倒れます。
 - **品質不足は作業ごと・期限付きです。** `scope`（Task ID）が付いた記録は、同じ `scope` の起動にだけ効きます。無関係なTaskへ永久に効かせません。12時間（`QUALITY_MAX_AGE_MS`）で失効します。
 
@@ -74,12 +86,19 @@ node <home>/.jev-router/orca-launch/launch.cjs implementation [-- 引数]
   "version": 2,
   "candidates": {
     "opencode-free": { "at": "2026-10-22T05:10:00.000Z", "ok": true, "latencyMs": 3632 },
+    "opencode-free-glm": { "at": "2026-10-22T05:10:00.000Z", "ok": true, "model": "opencode/glm-5.3-flash-free" },
     "opencode-go": {
       "at": "2026-10-22T05:10:00.000Z",
       "ok": true,
       "model": "opencode-go/deepseek-v4.1-flash",
       "latencyMs": 4946,
       "quota": { "remaining": 40, "checkedAt": "2026-10-22T05:09:00.000Z", "source": "取得元の短い名前", "limit": 100 }
+    },
+    "opencode-go-glm": {
+      "at": "2026-10-22T05:10:00.000Z",
+      "ok": true,
+      "model": "opencode-go/glm-5.3-flash",
+      "quota": { "remaining": 40, "checkedAt": "2026-10-22T05:09:00.000Z", "source": "取得元の短い名前" }
     }
   }
 }
@@ -87,7 +106,7 @@ node <home>/.jev-router/orca-launch/launch.cjs implementation [-- 引数]
 
 - `at` … 観測時刻（ISO）。24時間を超えると未確認へ戻ります。未来は無効。
 - `ok:false` のときは `failure` を付けます。
-- **`model` … Goで実際に確認した `provider/model`。これが無い、または `GO_MODEL_ALLOWLIST` に無い記録はGoの許可になりません**（旧GLM時代の記録を流用しないため）。
+- **`model` … その候補で実際に確認した `provider/model`。** 候補ごとの `family`（`HARNESS_CANDIDATES`）に一致しない記録は、その候補の許可になりません。GLM Free・Go GLM・Go DeepSeek は `model` が必須で、無い記録は未確認として無効です。既存の `opencode-free`（DeepSeek Free）だけは、古い記録（`model` 無し）でも動きます。
 - `quota.remaining` … 取得元が返した残量（数値）。`checkedAt` が1時間を超えると未確認へ戻ります。`source` は秘密を含まない短い名前。`limit` は任意。
 - `quality: [{"at":"ISO","scope":"APP-G1-T02","evidence":"短い説明"}]` … 品質不足の記録。`scope` が無い記録は全作業に効きますが、期限で失効します。
 - 書き込みは同梱の `writeHarnessStatus`（配置済みruntime）を使うと原子的に1候補だけ更新できます。資格情報・URL・環境変数はこのファイルへ入れません。
@@ -129,4 +148,6 @@ node scripts/enable-harness-selection.cjs        # ~/.jev-router/orca-launch/lau
 - 品質不足は自動判定しません。PM/確認者が `quality_insufficient` を記録したときだけGoが解禁されます。
 - 対話（TUI）の形では標準エラーを奪わないため、失敗の分類ができません。分類できない失敗は再試行せず停止します。
 - 対象環境（デスクトップ・deep-dev2・deep-dev）ごとに、認証とprovider設定はその機械のままです。
+- **GLM Free（`opencode/glm-5.3-flash-free`）は実ID・無料経路・実動作が未確認のあいだ無効のままです。** 確認できた時点で `harness-status.json` の `opencode-free-glm` に `model` を書くと有効になります。推測のIDでは選びません。
+- 無料枠の実切れは再現できないため、`FreeUsageLimitError` などの分類と「Free→別の無料→Go→Pi」の連続選択は局所回帰で確認しています（模擬の失敗メッセージ → 失敗を状態へ書き戻し → Piが同じ依頼文に回答）。実機の枠切れは次の観測で確認します。
 - 非対話の子プロセスの標準入力は閉じます（`stdio:['ignore','pipe','pipe']`）。`opencode run` は標準入力のEOFを待つため、サーバーでstdinが開いたパイプのままだと無出力で止まります。

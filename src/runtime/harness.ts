@@ -48,18 +48,70 @@ export interface HarnessStatus {
   readonly candidates: Readonly<Record<string, HarnessStatusEntry>>;
 }
 
-export type HarnessCandidateId = "opencode-free" | "opencode-go";
+/**
+ * Two free candidates (group 1) and two paid Go candidates (group 2). Every candidate keeps its own
+ * health, failure, quota and model: one model losing its free allowance says nothing about another.
+ */
+export type HarnessCandidateId = "opencode-free" | "opencode-free-glm" | "opencode-go" | "opencode-go-glm";
 
-export const HARNESS_CANDIDATES = {
-  "opencode-free": { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-  "opencode-go": { harness: "opencode", model: "opencode-go/deepseek-v4.1-flash" },
-} as const satisfies Record<HarnessCandidateId, { harness: "opencode"; model: string }>;
+export interface HarnessCandidate {
+  readonly harness: "opencode";
+  /** 1 = free allowance, 2 = OpenCode Go contract. A cheaper group is always tried first. */
+  readonly group: 1 | 2;
+  /**
+   * The id this candidate is expected to run. For a candidate whose id is not verified yet this is a
+   * placeholder: it is never executed, because those candidates also require the recorded `model`.
+   */
+  readonly model: string;
+  /** Model ids this candidate is allowed to run. A record outside this list is refused. */
+  readonly family: readonly string[];
+  /** The incumbent free candidate keeps working with an old record that has no `model`. */
+  readonly modelRequired: boolean;
+}
+
+export const HARNESS_CANDIDATES: Readonly<Record<HarnessCandidateId, HarnessCandidate>> = {
+  "opencode-free": {
+    harness: "opencode",
+    group: 1,
+    model: "opencode/deepseek-v4.1-flash-free",
+    family: ["opencode/deepseek-v4.1-flash-free"],
+    modelRequired: false,
+  },
+  // Activated only by a recorded id that matches this family. Until the access owner verifies the
+  // GLM free id, pricing route and a real round trip, this candidate stays unselectable.
+  "opencode-free-glm": {
+    harness: "opencode",
+    group: 1,
+    model: "opencode/glm-5.3-flash-free",
+    family: ["opencode/glm-5.3-flash-free"],
+    modelRequired: true,
+  },
+  "opencode-go": {
+    harness: "opencode",
+    group: 2,
+    model: "opencode-go/deepseek-v4.1-flash",
+    family: ["opencode-go/deepseek-v4.1-flash"],
+    modelRequired: true,
+  },
+  "opencode-go-glm": {
+    harness: "opencode",
+    group: 2,
+    model: "opencode-go/glm-5.3-flash",
+    family: ["opencode-go/glm-5.3-flash"],
+    modelRequired: true,
+  },
+};
+
+/** Selection order inside a group: the incumbent DeepSeek candidate first. */
+export const CANDIDATE_ORDER: readonly HarnessCandidateId[] = ["opencode-free", "opencode-free-glm", "opencode-go", "opencode-go-glm"];
 
 /**
- * Models a paid Go call may actually run. The GLM-era record is deliberately absent: an old
- * observation must not be readable as permission to spend on the DeepSeek Go plan.
+ * Models a paid Go call may actually run. Kept as the union of the paid families so an old
+ * DeepSeek-era observer keeps reading a meaningful list; per-candidate checks use `family`.
  */
-export const GO_MODEL_ALLOWLIST: readonly string[] = ["opencode-go/deepseek-v4.1-flash"];
+export const GO_MODEL_ALLOWLIST: readonly string[] = CANDIDATE_ORDER.filter((id) => HARNESS_CANDIDATES[id].group === 2).flatMap(
+  (id) => HARNESS_CANDIDATES[id].family,
+);
 
 /** A healthy probe older than this is treated as unknown, not as still healthy. */
 export const HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -212,10 +264,20 @@ export async function recordHarnessFailure(
   return true;
 }
 
-/** Operational failures are separated from a quality judgement: only the latter is about the model's ability. */
+/**
+ * Operational failures are separated from a quality judgement: only the latter is about the model's ability.
+ * A free allowance running out is reported by OpenCode as text, not only as HTTP 429, so those messages
+ * are classified as quota too; otherwise the launcher would not record the failure or move on.
+ */
 export function classifyHarnessFailure(text: string): HarnessFailureKind | null {
   if (/\b(?:401|403)\b|forbidden|unauthori[sz]ed|provider\.auth|invalid[_ -]?(?:api[_ -]?)?key/i.test(text)) return "auth";
-  if (/\b429\b|rate[ _-]?limit|too many requests|quota|insufficient[_ -]?(?:balance|funds)/i.test(text)) return "quota";
+  if (
+    /\b429\b|rate[ _-]?limit|too many requests|quota|insufficient[_ -]?(?:balance|funds)|free[_ -]?(?:usage[ _-]?)?limit|freeusagelimiterror|provider\.free-limit|usage limit reached|無料枠|上限に達/i.test(
+      text,
+    )
+  ) {
+    return "quota";
+  }
   if (/\b(?:503|529)\b|overloaded|capacity|server (?:busy|unavailable)|try again later|混雑/i.test(text)) return "congestion";
   if (
     /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network (?:error|unreachable)|connection (?:refused|reset|timed out)/i.test(text)
@@ -320,7 +382,7 @@ interface Verdict {
   readonly reason?: string;
 }
 
-function healthVerdict(entry: HarnessStatusEntry | undefined, now: number, id: HarnessCandidateId): Verdict {
+function healthVerdict(entry: HarnessStatusEntry | undefined, now: number): Verdict {
   if (!entry) return { eligible: false, reason: "unverified" };
   const at = Date.parse(entry.at);
   if (!Number.isFinite(at)) return { eligible: false, reason: "unverified" };
@@ -332,9 +394,6 @@ function healthVerdict(entry: HarnessStatusEntry | undefined, now: number, id: H
     };
   }
   if (now - at > HEALTH_MAX_AGE_MS) return { eligible: false, reason: "health_stale" };
-  if (id === "opencode-free" && entry.model && entry.model !== HARNESS_CANDIDATES["opencode-free"].model) {
-    return { eligible: false, reason: "model_unverified" };
-  }
   return { eligible: true };
 }
 
@@ -350,11 +409,17 @@ function quotaVerdict(entry: HarnessStatusEntry | undefined, now: number): Verdi
   return { eligible: true };
 }
 
-/** A paid candidate only runs a model the probe owner actually verified on that provider. */
-function modelVerdict(entry: HarnessStatusEntry | undefined): Verdict {
-  if (!entry?.model) return { eligible: false, reason: "model_unverified" };
-  const base = entry.model.split("#")[0] ?? entry.model;
-  return GO_MODEL_ALLOWLIST.includes(base) ? { eligible: true } : { eligible: false, reason: "model_not_allowed" };
+/**
+ * A candidate only runs a model its own family allows. A paid or not-yet-verified candidate needs
+ * the id the observer recorded; the incumbent free candidate still works with an older record.
+ */
+function modelVerdict(entry: HarnessStatusEntry | undefined, id: HarnessCandidateId): Verdict {
+  const candidate = HARNESS_CANDIDATES[id];
+  if (entry?.model) {
+    const base = entry.model.split("#")[0] ?? entry.model;
+    return candidate.family.includes(base) ? { eligible: true } : { eligible: false, reason: "model_not_allowed" };
+  }
+  return candidate.modelRequired ? { eligible: false, reason: "model_unverified" } : { eligible: true };
 }
 
 /**
@@ -376,10 +441,21 @@ function qualityVerdict(entry: HarnessStatusEntry | undefined, now: number, scop
   return { eligible: false, reason: "quality_insufficient" };
 }
 
+/** How a candidate id appears in the recorded reasons; kept stable for existing readers. */
+const REASON_TAG: Readonly<Record<HarnessCandidateId, string>> = {
+  "opencode-free": "free",
+  "opencode-free-glm": "free_glm",
+  "opencode-go": "go",
+  "opencode-go-glm": "go_glm",
+};
+
 /**
- * Free first; then the paid Go plan when Free itself ran out of capacity or was judged too weak
- * for this scope; otherwise the existing Pi/Claude route. Auth or network failures are not a
- * reason to spend, and work the existing judgement calls hard goes straight to Pi.
+ * Group 1 (free) in order, then group 2 (Go) when a free candidate lost capacity, then the existing
+ * Pi/Claude route. Each candidate is judged on its own record, so an exhausted free model does not
+ * disable the other free model and a stale Go record does not authorise spending.
+ *
+ * Auth or network failures are not capacity, and work the existing judgement calls hard never
+ * touches either group: it goes straight to Pi.
  */
 export function selectHarness(input: SelectionInput): HarnessSelection {
   const now = input.now ?? Date.now();
@@ -392,78 +468,85 @@ export function selectHarness(input: SelectionInput): HarnessSelection {
   if (input.role !== "implementation") return existing(["role_not_implementation"]);
 
   const excluded = new Set(input.exclude ?? []);
-  const free = input.status.candidates["opencode-free"];
-  const go = input.status.candidates["opencode-go"];
-  const freeHealth = healthVerdict(free, now, "opencode-free");
-  const freeQuality = qualityVerdict(free, now, input.scope);
-  const freeReason =
-    (excluded.has("opencode-free") ? "excluded_after_failure" : undefined) ??
-    (!freeHealth.eligible ? (freeHealth.reason as string) : undefined) ??
-    (!freeQuality.eligible ? (freeQuality.reason as string) : undefined);
+  const verdicts = new Map<HarnessCandidateId, string | undefined>();
+  for (const id of CANDIDATE_ORDER) {
+    const entry = input.status.candidates[id];
+    const candidate = HARNESS_CANDIDATES[id];
+    const health = healthVerdict(entry, now);
+    const model = modelVerdict(entry, id);
+    const quality = qualityVerdict(entry, now, input.scope);
+    const quota = candidate.group === 2 ? quotaVerdict(entry, now) : { eligible: true };
+    verdicts.set(
+      id,
+      (excluded.has(id) ? "excluded_after_failure" : undefined) ??
+        (!health.eligible ? (health.reason as string) : undefined) ??
+        (!model.eligible ? (model.reason as string) : undefined) ??
+        (!quality.eligible ? (quality.reason as string) : undefined) ??
+        (!quota.eligible ? (quota.reason as string) : undefined),
+    );
+  }
 
-  const goHealth = healthVerdict(go, now, "opencode-go");
-  const goModel = modelVerdict(go);
-  const goQuota = quotaVerdict(go, now);
-  const goReason = !goHealth.eligible
-    ? (goHealth.reason as string)
-    : !goModel.eligible
-      ? (goModel.reason as string)
-      : !goQuota.eligible
-        ? (goQuota.reason as string)
-        : excluded.has("opencode-go")
-          ? "excluded_after_failure"
-          : undefined;
+  const free = CANDIDATE_ORDER.filter((id) => HARNESS_CANDIDATES[id].group === 1);
+  const paid = CANDIDATE_ORDER.filter((id) => HARNESS_CANDIDATES[id].group === 2);
+  const reasonOf = (id: HarnessCandidateId) => verdicts.get(id);
+  const rejections: Rejection[] = CANDIDATE_ORDER.filter((id) => reasonOf(id) !== undefined).map((id) => ({
+    candidate: id,
+    reason: reasonOf(id) as string,
+  }));
+  const freeTags = free.filter((id) => reasonOf(id) !== undefined).map((id) => `${REASON_TAG[id]}_${reasonOf(id)}`);
+  const paidTags = paid.filter((id) => reasonOf(id) !== undefined).map((id) => `${REASON_TAG[id]}_${reasonOf(id)}`);
+  const chosen = (id: HarnessCandidateId): HarnessSelection => ({
+    kind: "opencode",
+    candidate: id,
+    model: input.status.candidates[id]?.model ?? HARNESS_CANDIDATES[id].model,
+    reasons: [
+      "role_explicit_implementation",
+      HARNESS_CANDIDATES[id].group === 1 ? "free_verified" : "go_verified",
+      // Why the candidates ahead of this one were passed over stays visible to the operator.
+      ...CANDIDATE_ORDER.filter((other) => other !== id && reasonOf(other) !== undefined).map(
+        (other) => `${REASON_TAG[other]}_${reasonOf(other)}`,
+      ),
+    ],
+    rejected: rejections.filter((r) => r.candidate !== id),
+  });
 
-  const rejections: Rejection[] = [];
-  if (freeReason) rejections.push({ candidate: "opencode-free", reason: freeReason });
-  if (goReason) rejections.push({ candidate: "opencode-go", reason: goReason });
-
-  // Difficult work is not cheap-model work: the existing judgement sends it to Pi and skips Go too.
   if (input.hard) {
     return existing(
-      [
-        "role_explicit_implementation",
-        ...(freeReason ? [`free_${freeReason}`] : []),
-        "hard_work_pi",
-        ...(goReason ? [`go_${goReason}`] : ["go_skipped_hard_work"]),
-      ],
+      ["role_explicit_implementation", ...freeTags, "hard_work_pi", ...(paidTags.length > 0 ? paidTags : ["go_skipped_hard_work"])],
       rejections,
     );
   }
 
-  if (!freeReason) {
-    return {
-      kind: "opencode",
-      candidate: "opencode-free",
-      model: HARNESS_CANDIDATES["opencode-free"].model,
-      reasons: ["role_explicit_implementation", "free_verified"],
-      rejected: rejections,
-    };
-  }
+  const freePick = free.find((id) => reasonOf(id) === undefined);
+  if (freePick) return chosen(freePick);
 
-  // Capacity is what unlocks the paid plan: Free running out, throttling, congestion, or a recorded
-  // quality shortfall for this same work. Auth and network trouble are not capacity.
-  const freeShortfall =
-    freeReason === "quota_failure" ||
-    freeReason === "congestion_failure" ||
-    freeReason === "quality_insufficient" ||
-    freeReason === "excluded_after_failure";
-  if (freeShortfall && !goReason) {
-    const model = go?.model ?? HARNESS_CANDIDATES["opencode-go"].model;
-    return {
-      kind: "opencode",
-      candidate: "opencode-go",
-      model,
-      reasons: ["role_explicit_implementation", `free_${freeReason}`, "go_model_verified", "go_quota_verified"],
-      rejected: rejections,
-    };
+  // Capacity is what unlocks the paid plan: a free model running out, throttling, congestion, or a
+  // recorded quality shortfall for this same work. Auth, network and an unverified record are not.
+  const freeShortfall = free.some((id) => {
+    const reason = reasonOf(id);
+    return (
+      reason === "quota_failure" ||
+      reason === "congestion_failure" ||
+      reason === "quality_insufficient" ||
+      reason === "excluded_after_failure"
+    );
+  });
+  if (freeShortfall) {
+    const paidPick = paid.find((id) => reasonOf(id) === undefined);
+    if (paidPick) {
+      return {
+        ...chosen(paidPick),
+        reasons: ["role_explicit_implementation", ...freeTags, "go_verified"],
+      };
+    }
   }
-  const withheld = !freeShortfall && !goReason;
   return existing(
     [
       "role_explicit_implementation",
-      `free_${freeReason}`,
-      ...(goReason ? [`go_${goReason}`] : withheld ? ["go_withheld_operational"] : []),
+      ...freeTags,
+      ...paidTags,
+      // Paid capacity was available but the free shortfall was not a capacity one: nothing to spend.
+      ...(freeShortfall ? ["go_none_verified"] : ["go_withheld_operational"]),
     ],
     rejections,
   );
@@ -573,9 +656,12 @@ export function implementationCall(args: readonly string[], stdinPrompt?: string
  * What to do after a non-zero OpenCode exit. Capacity losses may be retried once on the next
  * candidate, but only in the non-interactive shape and only when the workspace is clean: two
  * harnesses must never edit the same working tree. Anything else stops and hands over.
+ *
+ * `no_output` (a zero exit with nothing printed) is deliberately not retried: it is not a capacity
+ * signal, and writing it into the status file would sideline a healthy model for a day.
  */
 export function retryDecision(
-  kind: HarnessFailureKind | null,
+  kind: HarnessFailureKind | "no_output" | null,
   shape: "tui" | "run",
   workspaceDirty: boolean,
 ): "retry" | "handoff" | "stop" {
@@ -585,7 +671,8 @@ export function retryDecision(
 }
 
 /** Keep every existing OpenCode setting and change only the model this boundary selected. */
-export function opencodeOverlay(model: string, existing?: string): string {  let base: Record<string, unknown> = {};
+export function opencodeOverlay(model: string, existing?: string): string {
+  let base: Record<string, unknown> = {};
   if (existing) {
     try {
       const parsed: unknown = JSON.parse(existing);

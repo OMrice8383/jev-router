@@ -2,6 +2,7 @@ export type { CatalogEntry, DefaultCandidate, EgressName, KeyDetection } from ".
 export { buildDefaultPolicy, DEFAULT_CANDIDATES, DEFAULT_RULES, detectKeys, EGRESS_DEFAULTS, parseOpenRouterCatalog } from "./defaults";
 export type {
   ExistingHarness,
+  HarnessCandidate,
   HarnessCandidateId,
   HarnessFailureKind,
   HarnessLaunch,
@@ -16,6 +17,7 @@ export type {
   SelectionInput,
 } from "./harness";
 export {
+  CANDIDATE_ORDER,
   CLOCK_SKEW_MS,
   classifyHarnessFailure,
   GO_MODEL_ALLOWLIST,
