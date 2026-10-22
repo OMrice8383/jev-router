@@ -32,12 +32,16 @@ node <home>/.jev-router/orca-launch/launch.cjs implementation [-- 引数]
 2. **非対話**（PM受付）: `-p` / `--print` を含むPi互換の呼び方。
    - `-p <text>` はその文字列、`-p` だけなら **stdinをEOFまで読んで**プロンプトにします（TTYのまま渡さない）。
    - Jevが `opencode run --agent build --auto <prompt>` に変換します。
+   - 子プロセスの標準入力は**閉じます**。`opencode run <prompt>` は標準入力が終端しないと1文字も出さずに待つため、呼び出し側が開いたパイプをそのまま渡すと、モデルに届かないまま無出力で止まります（2026-10-22、deep-dev2/deep-dev の実測）。
    - Pi専用のフラグ（`--no-session` `--no-extensions` `--no-mcp` `--no-skills` など）は落とし、**落とした名前を `droppedArgs` としてログに残します**。無言で消しません。
 
 ### 出力と終了コード
 
-- 非対話の stdout は最終応答テキストだけ。進捗・警告は stderr。
+- 非対話の stdout は最終応答テキストだけ。途中の文章は stderr に進捗として流します（`--format json` で受け、最後の text パートだけ stdout へ）。
+- 子は `--standalone` で専用サーバーを立てます。共有のバックグラウンドサービスは起動時に読んだ設定を保持し、後から渡した `OPENCODE_CONFIG_CONTENT` を無視するためです（deep-dev2 実測。この場合選んだモデルではなく `opencode-go/auto` が走ります）。
 - 終了コードはOpenCodeの値（0=正常、非0=失敗）。Jevはタイムアウトを足しません（呼び出し側の責任）。
+- **終了コード0でも本文が0バイトなら失敗**（`failureKind:"no_output"`、exit 1）。無出力を成功と読み替えません。
+- `SIGINT` / `SIGTERM` は子へ転送し、`event:"harness_cancel"` を残して 130 / 143 で終わります（Linux）。Windowsの強制終了では子が残るため、取消は呼び出し側が変更の有無を確認してから行ってください。
 - 起動確認だけなら `JEV_ORCA_PROBE=1`。選択結果と `args` / `droppedArgs` のJSONを出し、推論を始めません。
 
 ## 実行後の扱い
