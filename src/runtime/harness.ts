@@ -115,8 +115,12 @@ export const GO_MODEL_ALLOWLIST: readonly string[] = CANDIDATE_ORDER.filter((id)
 
 /** A healthy probe older than this is treated as unknown, not as still healthy. */
 export const HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-/** Remaining allowance changes within a working day, so it expires sooner than a plain health check. */
-export const QUOTA_MAX_AGE_MS = 60 * 60 * 1000;
+/**
+ * Nagakura 2026-10-22: "残枠は気にしないで使って、使えなかったらPiに行くでいい".
+ * The remaining number is advisory, so a stale reading no longer gates a launch. It is kept
+ * so an operator can still see when the console was last read; a real 429 still falls back.
+ */
+export const QUOTA_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 /** A quality judgement is about one piece of work; it stops applying on its own. */
 export const QUALITY_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 /** Tolerated clock skew before a timestamp counts as "from the future" rather than fresh. */
@@ -397,14 +401,16 @@ function healthVerdict(entry: HarnessStatusEntry | undefined, now: number): Verd
   return { eligible: true };
 }
 
-/** Go needs a numeric remainder read recently from a stated source; a success or token count is not one. */
+/**
+ * Go runs without a numeric remainder: Nagakura 2026-10-22 ("残枠は気にしないで使って、使えなかったら
+ * Piに行くでいい"). The recorded value is advisory — kept for the operator, never reconstructed or
+ * doubled. A flagged number (0, a past window the owner marked exhausted) still stops the walk.
+ */
 function quotaVerdict(entry: HarnessStatusEntry | undefined, now: number): Verdict {
   const quota = entry?.quota;
-  if (!quota) return { eligible: false, reason: "quota_unknown" };
+  if (!quota) return { eligible: true };
   const checkedAt = Date.parse(quota.checkedAt);
-  if (!Number.isFinite(checkedAt)) return { eligible: false, reason: "quota_unknown" };
-  if (checkedAt - now > CLOCK_SKEW_MS) return { eligible: false, reason: "quota_future" };
-  if (now - checkedAt > QUOTA_MAX_AGE_MS) return { eligible: false, reason: "quota_stale" };
+  if (Number.isFinite(checkedAt) && checkedAt - now > CLOCK_SKEW_MS) return { eligible: false, reason: "quota_future" };
   if (!(quota.remaining > 0)) return { eligible: false, reason: "quota_exhausted" };
   return { eligible: true };
 }
