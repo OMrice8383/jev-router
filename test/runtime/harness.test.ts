@@ -3,10 +3,12 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CANDIDATE_ORDER,
   CLOCK_SKEW_MS,
   classifyHarnessFailure,
   GO_MODEL_ALLOWLIST,
   HARNESS_CANDIDATES,
+  type HarnessCandidateId,
   type HarnessStatus,
   HEALTH_MAX_AGE_MS,
   implementationCall,
@@ -29,10 +31,19 @@ const now = Date.parse("2026-10-22T06:00:00.000Z");
 const at = (msAgo = 60_000) => new Date(now - msAgo).toISOString();
 const future = (msAhead = CLOCK_SKEW_MS + 60_000) => new Date(now + msAhead).toISOString();
 
+const statusOf = (entries: Record<string, object>): HarnessStatus => parseHarnessStatus({ candidates: entries }, now);
+
 const status = (free: object | undefined, go: object | undefined): HarnessStatus =>
-  parseHarnessStatus({ candidates: { ...(free ? { "opencode-free": free } : {}), ...(go ? { "opencode-go": go } : {}) } }, now);
+  statusOf({ ...(free ? { "opencode-free": free } : {}), ...(go ? { "opencode-go": go } : {}) });
 
 const healthy = (msAgo = 60_000) => ({ at: at(msAgo), ok: true, latencyMs: 3600 });
+const failed = (failure: string): object => ({ at: at(), ok: false, failure });
+const freeGlmReady = () => ({ ...healthy(), model: HARNESS_CANDIDATES["opencode-free-glm"].model });
+const goGlmReady = (remaining = 40) => ({
+  ...healthy(),
+  model: HARNESS_CANDIDATES["opencode-go-glm"].model,
+  quota: quota(remaining),
+});
 const quota = (remaining: number, msAgo = 60_000) => ({
   remaining,
   checkedAt: at(msAgo),
@@ -76,7 +87,7 @@ test("an unverified candidate is never selected, and the existing route keeps wo
   expect(selection.harness).toBe("pi");
   expect(selection.reasons).toContain("free_unverified");
   expect(selection.reasons).toContain("go_unverified");
-  expect(selection.rejected.map((r) => r.candidate)).toEqual(["opencode-free", "opencode-go"]);
+  expect(selection.rejected.map((r) => r.candidate)).toEqual(["opencode-free", "opencode-free-glm", "opencode-go", "opencode-go-glm"]);
 });
 
 test("a stale health record is unknown again, and a future one is never fresh", () => {
@@ -145,16 +156,123 @@ test("Free capacity shortfalls unlock the paid DeepSeek Go plan only when its mo
   if (quality.kind === "opencode") expect(quality.candidate).toBe("opencode-go");
 });
 
-test("the retired GLM observation is not permission to run the Go DeepSeek plan", () => {
-  const noModel = pick(status({ at: at(), ok: false, failure: "quota" }, { ...healthy(), quota: quota(40) }));
+test("a GLM id recorded under the DeepSeek candidate is not permission to run it", () => {
+  const noModel = pick(status(failed("quota"), { ...healthy(), quota: quota(40) }));
   expect(noModel.kind).toBe("existing");
   if (noModel.kind === "existing") expect(noModel.reasons).toContain("go_model_unverified");
 
-  const glm = pick(
-    status({ at: at(), ok: false, failure: "quota" }, { ...healthy(), model: "opencode-go/glm-5.3-flash", quota: quota(40) }),
-  );
+  const glm = pick(status(failed("quota"), { ...healthy(), model: "opencode-go/glm-5.3-flash", quota: quota(40) }));
   expect(glm.kind).toBe("existing");
   if (glm.kind === "existing") expect(glm.reasons).toContain("go_model_not_allowed");
+});
+
+test("a free candidate's failure never disables the other free candidate", () => {
+  const otherFreeOnly = statusOf({ "opencode-free": failed("quota"), "opencode-free-glm": freeGlmReady() });
+  const selection = pick(otherFreeOnly);
+  expect(selection.kind).toBe("opencode");
+  if (selection.kind === "opencode") {
+    expect(selection.candidate).toBe("opencode-free-glm");
+    expect(selection.model).toBe(HARNESS_CANDIDATES["opencode-free-glm"].model);
+    // The paid plan is not touched while a free candidate can still run the work.
+    expect(selection.reasons).toContain("free_verified");
+    expect(selection.reasons).not.toContain("go_verified");
+  }
+});
+
+test("a not-yet-verified GLM candidate is skipped, not guessed", () => {
+  // A healthy record without the verified id is not selectable.
+  const unrecorded = pick(statusOf({ "opencode-free-glm": healthy() }));
+  expect(unrecorded.kind).toBe("existing");
+  if (unrecorded.kind === "existing") expect(unrecorded.reasons).toContain("free_glm_model_unverified");
+
+  // An id outside the candidate's own family is refused even when healthy.
+  const foreign = pick(statusOf({ "opencode-free-glm": { ...healthy(), model: "opencode-go/glm-5.3-flash" } }));
+  expect(foreign.kind).toBe("existing");
+  if (foreign.kind === "existing") expect(foreign.reasons).toContain("free_glm_model_not_allowed");
+
+  // The Go GLM candidate needs its own recorded id too.
+  const goGlmBare = pick(statusOf({ "opencode-free": failed("quota"), "opencode-go-glm": { ...healthy(), quota: quota(40) } }));
+  expect(goGlmBare.kind).toBe("existing");
+  if (goGlmBare.kind === "existing") expect(goGlmBare.reasons).toContain("go_glm_model_unverified");
+});
+
+test("the free group is tried in order before any paid candidate, and Pi is last", () => {
+  const bothFreeAvailable = statusOf({
+    "opencode-free": failed("quota"),
+    "opencode-free-glm": freeGlmReady(),
+    "opencode-go": goReady(),
+    "opencode-go-glm": goGlmReady(),
+  });
+  // Each step is the next attempt in the same launch, after the previous candidate failed.
+  const steps: [HarnessCandidateId[], string][] = [
+    [[], "opencode-free-glm"],
+    [["opencode-free", "opencode-free-glm"], "opencode-go"],
+    [["opencode-free", "opencode-free-glm", "opencode-go"], "opencode-go-glm"],
+  ];
+  for (const [exclude, expected] of steps) {
+    const selection = selectHarness({ role: "implementation", fallback: "pi", status: bothFreeAvailable, now, exclude });
+    expect(selection.kind).toBe("opencode");
+    if (selection.kind === "opencode") expect(selection.candidate).toBe(expected);
+  }
+  const all = selectHarness({
+    role: "implementation",
+    fallback: "pi",
+    status: bothFreeAvailable,
+    now,
+    exclude: CANDIDATE_ORDER,
+  });
+  expect(all.kind).toBe("existing");
+  if (all.kind === "existing") expect(all.harness).toBe("pi");
+});
+
+test("a free allowance lost mid-run hands the same request to Pi while the paid plan is unverified", async () => {
+  // The launcher records this from the exit text: the free model ran out while the work was in flight.
+  const afterLimit = statusOf({
+    "opencode-free": failed("quota"),
+    "opencode-go": { ...healthy(), quota: quota(40) },
+  });
+  const selection = selectHarness({ role: "implementation", fallback: "pi", status: afterLimit, now });
+  expect(selection.kind).toBe("existing");
+  if (selection.kind !== "existing") return;
+  expect(selection.harness).toBe("pi");
+  expect(selection.reasons).toContain("free_quota_failure");
+  expect(selection.reasons).toContain("go_model_unverified");
+
+  // A retry that also passes over the candidate recorded as failed reaches the same answer.
+  const retried = selectHarness({ role: "implementation", fallback: "pi", status: afterLimit, now, exclude: ["opencode-free"] });
+  expect(retried.kind).toBe("existing");
+  if (retried.kind === "existing") expect(retried.reasons).toContain("free_excluded_after_failure");
+
+  // The request itself survives the switch: the non-interactive shape still carries the prompt,
+  // which is what the launcher passes to Pi as an argument.
+  const plan = await resolveHarnessLaunch({
+    env: {},
+    args: ["-p", "--no-session"],
+    stdinPrompt: "fix the median case in calc.js",
+    status: afterLimit,
+    now,
+    exclude: ["opencode-free"],
+  });
+  expect(plan.kind).toBe("existing");
+  expect(implementationCall(["-p", "--no-session"], "fix the median case in calc.js").prompt).toBe("fix the median case in calc.js");
+});
+
+test("the next launch does not repeat the same Free failure", async () => {
+  const home = await mkdtemp(join(tmpdir(), "jev-harness-"));
+  const env = { JEV_ROUTER_HOME: home };
+  await writeHarnessStatus("opencode-free-glm", { at: at(), ok: true, model: HARNESS_CANDIDATES["opencode-free-glm"].model }, env, now);
+  await writeHarnessStatus("opencode-free", { at: at(), ok: true }, env, now);
+  expect(pick(await readHarnessStatus(env, now)).kind).toBe("opencode");
+  expect((pick(await readHarnessStatus(env, now)) as { candidate: string }).candidate).toBe("opencode-free");
+
+  // An observed free-limit failure is written back by the runtime, not by hand.
+  expect(await recordHarnessFailure("opencode-free", "quota", { env, at: new Date(now).toISOString() })).toBe(true);
+  const next = pick(await readHarnessStatus(env, now + 1000));
+  expect(next.kind).toBe("opencode");
+  if (next.kind === "opencode") {
+    expect(next.candidate).toBe("opencode-free-glm");
+    expect(next.reasons).toContain("free_quota_failure");
+  }
 });
 
 test("a quality shortfall is scoped and expires instead of blocking unrelated work forever", () => {
@@ -228,6 +346,10 @@ test("failure classes stay distinct and are not confused with a quality judgemen
   expect(classifyHarnessFailure("provider.auth: 403 Forbidden")).toBe("auth");
   expect(classifyHarnessFailure("HTTP 401 Unauthorized")).toBe("auth");
   expect(classifyHarnessFailure("429 Too Many Requests")).toBe("quota");
+  // Free allowance messages arrive as text, not only as HTTP 429.
+  expect(classifyHarnessFailure("FreeUsageLimitError: free tier exhausted")).toBe("quota");
+  expect(classifyHarnessFailure('{"error":{"type":"provider.free-limit"}}')).toBe("quota");
+  expect(classifyHarnessFailure("Free usage limit reached. Try again tomorrow.")).toBe("quota");
   expect(classifyHarnessFailure("503 Service Unavailable: overloaded")).toBe("congestion");
   expect(classifyHarnessFailure("ECONNREFUSED 127.0.0.1:443")).toBe("network");
   expect(classifyHarnessFailure("tests failed: expected 2 received 3")).toBeNull();
@@ -358,6 +480,8 @@ test("a capacity loss is retried once only in the non-interactive shape and only
   expect(retryDecision("auth", "run", false)).toBe("stop");
   expect(retryDecision("network", "run", false)).toBe("stop");
   expect(retryDecision(null, "run", false)).toBe("stop");
+  // A silent success is not a capacity signal, so it neither retries nor sidesteps the model.
+  expect(retryDecision("no_output", "run", false)).toBe("stop");
 });
 
 test("the launch work hint reuses the existing context: design and labelled hard work are not cheap-model work", () => {
