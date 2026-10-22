@@ -204,7 +204,7 @@ test("the free group is tried in order before any paid candidate, and Pi is last
     "opencode-go-glm": goGlmReady(),
   });
   // Each step is the next attempt in the same launch, after the previous candidate failed.
-  const steps: [HarnessCandidateId[], string][] = [
+  const steps: [HarnessCandidateId[], HarnessCandidateId][] = [
     [[], "opencode-free-glm"],
     [["opencode-free", "opencode-free-glm"], "opencode-go"],
     [["opencode-free", "opencode-free-glm", "opencode-go"], "opencode-go-glm"],
